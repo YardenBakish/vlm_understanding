@@ -7,7 +7,6 @@ import os
 from moviepy.editor import *
 import ast
 import pandas as pd
-from RAFT.optical_flow import compute_optical_flow
 from conditioned_models.FlowFormerPlusPlus.visualize_flow import extract_images,visualize_flow,build_model
 from conditioned_models.cotracker.generate_track import generate_track
 

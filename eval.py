@@ -5,7 +5,7 @@ TODO
 
 '''
 import os
-os.environ['MPLCONFIGDIR'] = '/home/ai_center/ai_users/yardenbakish/'
+os.environ['MPLCONFIGDIR'] = '/scratch200/yardenbakish/'
 
 import config
 import argparse
@@ -147,7 +147,7 @@ def parse_args():
         args.orig_dir = get_last_checkpoint_dir(f'{args.paths["distilled_models"]}/BB/{args.model_size}')
     else:
         args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    args.distiled_dir = get_last_checkpoint_dir(distilled_dir)
+    args.distiled_dir = args.orig_dir # get_last_checkpoint_dir(distilled_dir)
     
 
 
