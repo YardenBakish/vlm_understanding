@@ -25,8 +25,10 @@ DEFAULT_DEVICE = (
 def visualize_track(video_dir, output_dir, is_random=False):
 
     video_path = f"{video_dir}/video_original.mp4"
-    pred_tracks = torch.load(f"{video_dir}/tracks_grid/pred_tracks.pt", map_location=torch.device('cpu'))
-    pred_visibility = torch.load(f"{video_dir}/tracks_grid/pred_visibility.pt", map_location=torch.device('cpu'))
+    debug_dir = f'debug_tracks/{video_dir.split("/")[-1]}' 
+
+    pred_tracks = torch.load(f"{debug_dir}/pred_tracks.pt", map_location=torch.device('cpu'))
+    pred_visibility = torch.load(f"{debug_dir}/pred_visibility.pt", map_location=torch.device('cpu'))
 
     video = read_video_from_path(video_path)
     video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
@@ -51,6 +53,6 @@ def visualize_track(video_dir, output_dir, is_random=False):
    
 
 
-video_dir = "dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_001985"
+video_dir = "dataset/GOT10KVAL_teacher/GOT-10k_Val_000085"
 output_dir = "saved_videos"
 visualize_track(video_dir, output_dir, is_random=True)

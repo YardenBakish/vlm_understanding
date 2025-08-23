@@ -76,10 +76,6 @@ SAMPLES_TO_TEST = [
 #"GOT-10k_Val_000022",
 
 
-
-
-
-
 ]
 
 
@@ -415,6 +411,10 @@ def eval(args):
     prompt                = ""
     normalized_bbox                  = None
 
+
+    torch.manual_seed(42)
+    np.random.seed(42)
+
     explainations_compare_dict   = {"distilled": {}, "orig": {}}
     inputs_dict                 = {}
     ext = "labels_w_BB.csv" if "BB" in args.mode else "labels.csv"
@@ -440,22 +440,23 @@ def eval(args):
         model = SmolVLMForConditionalGeneration.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            use_cfg = True,
+            use_cfg = False,
 
          #   config = config
             #_attn_implementation="flash_attention_2"
         ).to("cuda")
 
         
-        if True:
+        if False:
             for name, param in model.model.vision_model.named_parameters():
+                #print(name)
                 if 'attentional_splatting.W_out' in name:
                     param.data.zero_()
 
 
           
        
-        if True:
+        if False:
             flow_component =  create_gmflow_model(load_weights=True)#create_optical_flow_model()
             model.model.vision_model.optical_flow = flow_component
      
@@ -527,12 +528,13 @@ def eval(args):
                 inputs = inputs.to(model.device, dtype=torch.bfloat16)
                 #visualize(inputs,bbox=normalized_bbox,indices=indices)
                 #exit(1)
-                #print(inputs.pixel_values.shape)
+                print(inputs.pixel_values.shape)
+                print("-----------")
                 #exit(1)
                 
                 
-                pred_tracks = torch.load("conditioned_models/cotracker/pred_tracks.pt")
-                pred_visibility = torch.load("conditioned_models/cotracker/pred_visibility.pt")
+                pred_tracks = torch.load(f"debug_tracks/{sample}/pred_tracks.pt")
+                pred_visibility = torch.load(f"debug_tracks/{sample}/pred_visibility.pt")
                 
                 print(pred_tracks.shape)
                 print(pred_tracks[:,indices,:,:].shape)

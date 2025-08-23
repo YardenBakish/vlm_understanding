@@ -472,7 +472,13 @@ class TracktentionLayer(nn.Module):
         _, M, _ = tracks.shape
         
         # Flatten spatial dimensions
+        print(f"features: {features.shape}" )
+
+
         features_flat = features.view(T, H * W, d_model)  # [T, HW, d_model]
+
+        print(f"features_flat: {features_flat.shape}" )
+
         
         # Create feature positions
         feature_positions = self.create_feature_positions(H, W, features.device)  # [HW, 2]

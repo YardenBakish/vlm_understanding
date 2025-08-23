@@ -394,7 +394,7 @@ def generate_movement_reps(args, input_dir,output_dir,step):
 def generate_track_reps(video_path, output_dir, is_random=False):
 
     duration = VideoFileClip(video_path).duration
-    if False:
+    if duration > 20:
        
         generate_track_online(video_path, output_dir, is_random=False)
         
@@ -581,3 +581,104 @@ if __name__ == "__main__":
         exit(1)
 
 '''
+
+
+def collect_optical_flow(examples,example, videoPath, indices, target_W, target_H):
+    example_flow_maps = []
+
+    flo_path = example[videoPath].split("/")[:-1]
+    flo_path = "/".join(flo_path)
+    flo_path = f"{flo_path}/movement_flow_1"
+    flo_paths = np.array(sorted(glob(f'{flo_path}/*.flo'), key=lambda p: int(p.split('/')[-1].split('_')[1].split('.')[0])))
+    
+    if indices[-1] >= len(flo_paths):
+        indices[-1] =len(flo_paths) -1
+    flo_paths = flo_paths[indices]
+    flo_paths = flo_paths[:-1]
+    
+    co = 0
+    for i, flo_file_path in enumerate(flo_paths):
+        with open(flo_file_path, 'rb') as f:
+            # Read magic number
+            magic = np.frombuffer(f.read(4), dtype=np.float32)[0]
+            if magic != 202021.25:
+                raise ValueError("Not a valid .flo file")
+            # Read width, height
+            w, h = np.frombuffer(f.read(8), dtype=np.int32)
+            # Read flow data
+            flow = np.frombuffer(f.read(), dtype=np.float32)
+            flow = flow.reshape(h, w, 2)
+            flow = cv2.resize(flow, (target_W, target_H), interpolation=cv2.INTER_LINEAR)
+            '''
+            if "001148" in example[videoPath]:
+               req_flow = torch.from_numpy(flow).permute(2, 0, 1).float().permute(1, 2, 0)
+               req_flow = req_flow.cpu().numpy()
+       
+               flow_img = flow_to_image(req_flow)
+               cv2.imwrite(f"to_del/img{i}.png", flow_img[:, :, [2,1,0]])
+              '''
+           
+    
+            example_flow_maps.append(torch.from_numpy(flow).permute(2, 0, 1).float().to("cuda"))  
+    return example_flow_maps
+    
+
+
+def pad_optical_flow(all_flow_maps):
+    max_flow_frames = max(len(flow_maps) for flow_maps in all_flow_maps) if all_flow_maps else 0
+    
+    if max_flow_frames > 0:
+        # Get dimensions from first flow map
+        sample_flow = all_flow_maps[0][0]
+        flow_channels, flow_h, flow_w = sample_flow.shape
+        
+        # Create padded tensor for all flow maps
+        padded_flow_maps = torch.zeros(
+            (len(examples), max_flow_frames, flow_channels, flow_h, flow_w),
+            dtype=sample_flow.dtype,
+            device=sample_flow.device
+        )
+        
+        # Fill in the actual flow data
+        for batch_idx, example_flows in enumerate(all_flow_maps):
+            for frame_idx, flow_map in enumerate(example_flows):
+                padded_flow_maps[batch_idx, frame_idx] = flow_map
+        
+        optical_flow_maps = padded_flow_maps
+    else:
+        optical_flow_maps = torch.empty(0)
+    return optical_flow_maps
+
+
+def collect_tracks(example, videoPath, indices, target_W, target_H):
+    
+
+    tracks_path = example[videoPath].split("/")[:-1]
+    tracks_path = "/".join(tracks_path)
+    tracks_path = f"{tracks_path}/tracks_grid"
+    pred_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
+    pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt")
+
+
+    
+
+    original_h, original_w = (512,512)
+
+
+    scale_x = target_W / original_w
+    scale_y = target_H / original_h
+
+    scale_factors = torch.tensor([scale_x, scale_y], 
+                                device=pred_tracks.device, 
+                                dtype=pred_tracks.dtype)
+
+    pred_tracks = pred_tracks * scale_factors
+
+
+    pred_tracks = pred_tracks[:,indices,:,:].to(dtype=torch.bfloat16)
+    pred_visibility = pred_visibility[:,indices,:]
+
+    return pred_tracks, pred_visibility
+
+    
+    

@@ -91,30 +91,26 @@ class CustomTrainer(Trainer):
 
 
 
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Distillation of SmolVLM2-500M-Video-Instruct for poor-apperance sequence')
 
     parser.add_argument('--mode', type=str,
-                                choices=['caption_optical_flow', 'BB_optical_flow',],
-                                default = 'caption_optical_flow',
+                                choices=['cfg_cap', 'cfg_BB', 'cfg_optflow_cap', 'cfg_optflow_BB'],
+                                default = 'cfg_cap',
                                 help='')
 
     parser.add_argument('--model-size', type=str,
-                                choices=['500M', '2.2B', '2.2B_quant'],
-                                default = '500M',
+                                choices=['500M', '2.2B'],
+                                default = '2.2B',
                                 help='')
     
-    parser.add_argument('--train-mode', type=str,
-                                choices=['all', 'optical_flow_only',],
-                                default = 'all',
-                                help='')
+    parser.add_argument('--resume', action='store_true')
+   
     
     args = parser.parse_args()
     config.get_config(args)
 
-    args.save_dir = f'{args.paths["finetuned_models"]}/{args.mode}/{args.train_mode}/{args.model_size}'
+    args.save_dir = f'{args.paths["finetuned_models"]}/{args.mode}/{args.model_size}'
 
    
     args.model_id = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
@@ -145,21 +141,20 @@ class LossLoggerCallback(TrainerCallback):
 
 
 
-def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_frames):
+def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_frames, use_cfg, use_optFlow):
     pattern = re.compile(r'.*_(\d+)$')
     
     videoPath = "origin_video_path" if withBlur==False else "blur_full_video_path"
     instances = []
     all_flow_maps = []
+    all_pred_tracks = []
+    all_pred_visibility = []
+
     for example in examples:
         prompt = example["generated_prompt"]
        
 
-        example_flow_maps = []
-        flo_path = example[videoPath].split("/")[:-1]
-        flo_path = "/".join(flo_path)
-        flo_path = f"{flo_path}/movement_flow_1"
-        flo_paths = np.array(sorted(glob(f'{flo_path}/*.flo'), key=lambda p: int(p.split('/')[-1].split('_')[1].split('.')[0])))
+
         
         dummy_input = [{"type": "text", "text": "Caption the video."}]
         dummy_input.append({"type": "video", "path": example[videoPath]})
@@ -171,44 +166,23 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
         dummy_instance,indices =  processor.apply_chat_template(dummy_input, add_generation_prompt=False, extended = extended, num_frames = num_frames,
                                                  tokenize=True, return_dict=True, return_tensors="pt", return_frame_indices=True)
         
-        if indices[-1] >= len(flo_paths):
-            indices[-1] =len(flo_paths) -1
-        flo_paths = flo_paths[indices]
-        flo_paths = flo_paths[:-1]
-
         
         target_H = dummy_instance["pixel_values"].shape[-2]
         target_W = dummy_instance["pixel_values"].shape[-1]
-    
-        co = 0
-        for i, flo_file_path in enumerate(flo_paths):
-            with open(flo_file_path, 'rb') as f:
-                # Read magic number
-                magic = np.frombuffer(f.read(4), dtype=np.float32)[0]
-                if magic != 202021.25:
-                    raise ValueError("Not a valid .flo file")
+        
+        if use_optFlow:
+            example_flow_maps = collect_optical_flow(examples,example, videoPath, indices, target_W, target_H)
+            all_flow_maps.append(example_flow_maps)
+        else:
+            all_flow_maps = None
 
-                # Read width, height
-                w, h = np.frombuffer(f.read(8), dtype=np.int32)
+        if use_cfg:
+            ex_pred_tracks, ex_pred_visibility = collect_tracks(example, videoPath, indices, target_W, target_H)
+            all_pred_tracks.append(ex_pred_tracks)
+            all_pred_visibility.append(ex_pred_visibility)
 
-                # Read flow data
-                flow = np.frombuffer(f.read(), dtype=np.float32)
-                flow = flow.reshape(h, w, 2)
-
-                flow = cv2.resize(flow, (target_W, target_H), interpolation=cv2.INTER_LINEAR)
-
-                '''
-                if "001148" in example[videoPath]:
-                   req_flow = torch.from_numpy(flow).permute(2, 0, 1).float().permute(1, 2, 0)
-                   req_flow = req_flow.cpu().numpy()
-           
-                   flow_img = flow_to_image(req_flow)
-                   cv2.imwrite(f"to_del/img{i}.png", flow_img[:, :, [2,1,0]])
-                  '''
-               
-       
-                example_flow_maps.append(torch.from_numpy(flow).permute(2, 0, 1).float().to("cuda"))  
-        all_flow_maps.append(example_flow_maps)
+        else:
+             pred_tracks, pred_visibility = None, None
 
         user_content = [{"type": "text", "text": "Caption the video."}]
         user_content.append({"type": "video", "path": example[videoPath]})
@@ -220,6 +194,20 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
         instance = processor.apply_chat_template(messages, add_generation_prompt=False, extended = extended, num_frames = num_frames,
                                                  tokenize=True, return_dict=True, return_tensors="pt").to("cuda").to(model.dtype)
         instances.append(instance)
+
+    optical_flow_maps = None
+    if use_optFlow:
+        optical_flow_maps = pad_optical_flow(all_flow_maps)
+
+
+    pred_tracks = None
+    pred_visibility = None
+    if use_cfg:
+       
+        pred_tracks = torch.cat(all_pred_tracks, dim=0)
+        
+
+        pred_visibility = torch.cat(all_pred_visibility, dim=0)
 
 
     input_ids = pad_sequence(
@@ -241,39 +229,15 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
     labels[labels == image_token_id] = -100
 
 
-
-    max_flow_frames = max(len(flow_maps) for flow_maps in all_flow_maps) if all_flow_maps else 0
-    
-    if max_flow_frames > 0:
-        # Get dimensions from first flow map
-        sample_flow = all_flow_maps[0][0]
-        flow_channels, flow_h, flow_w = sample_flow.shape
-        
-        # Create padded tensor for all flow maps
-        padded_flow_maps = torch.zeros(
-            (len(examples), max_flow_frames, flow_channels, flow_h, flow_w),
-            dtype=sample_flow.dtype,
-            device=sample_flow.device
-        )
-        
-        # Fill in the actual flow data
-        for batch_idx, example_flows in enumerate(all_flow_maps):
-            for frame_idx, flow_map in enumerate(example_flows):
-                padded_flow_maps[batch_idx, frame_idx] = flow_map
-        
-        optical_flow_maps = padded_flow_maps
-    else:
-        optical_flow_maps = torch.empty(0)
-
-   
-
     out = {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        'optical_flow_maps': optical_flow_maps
+        'optical_flow_maps': optical_flow_maps,
+         'pred_tracks': pred_tracks,
+         'pred_visibility': pred_visibility,
+        
     }
-
 
     # Step 1: figure out maximum frames, height, width across the batch
     pvs = [inst["pixel_values"].squeeze(0) for inst in instances if "pixel_values" in inst]
@@ -305,23 +269,38 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
         padded_pixel_values_list.append(padded_pv)
 
     out["pixel_values"] = torch.stack(padded_pixel_values_list, dim=0)
+
+
     return out
 
 
-def freeze_layers(model, train_mode):
-    for name, param in model.named_parameters():
-        #param.requires_grad = False
-        if "optical_flow" in name:
-            if "backbone" in name:
+def adjust_architecture(model, args):
+    if "optflow" in args.mode :
+        if args.resume != True:
+            flow_component =  create_gmflow_model(load_weights=args.resume == True).to(model.device)
+            model.model.vision_model.optical_flow = flow_component
+
+        for name, param in model.named_parameters():
+            #param.requires_grad = False
+            if "optical_flow" in name:
+                if "backbone" in name:
+                    param.requires_grad = False
+            #else:
+            #    param.requires_grad = False
+
+    if "cfg" in args.mode:
+        for name, param in model.named_parameters():
+            if 'trackTention' not in name:
                 param.requires_grad = False
-        #else:
-        #    param.requires_grad = False
-     
+
+            if 'attentional_splatting.W_out' in name and args.resume != True:
+                param.data.zero_()
+    
     #for param in model.model.vision_model.parameters():
     #    param.requires_grad = False
         #param.requires_grad = False
-    for param in model.model.text_model.parameters():
-        param.requires_grad = False
+    #for param in model.model.text_model.parameters():
+    #    param.requires_grad = False
    
     
 
@@ -366,6 +345,8 @@ def train_w_movement(args):
         model = SmolVLMForConditionalGeneration.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
+            use_cfg = "cfg" in args.mode,
+            use_optFlow = "optFlow" in args.mode
             #_attn_implementation="flash_attention_2",
         ).to("cuda")
         #for name, param in model.model.vision_model.named_parameters():
@@ -374,21 +355,17 @@ def train_w_movement(args):
         #for param in model.model.vision_model.parameters():
         #    param.requires_grad = False
 
-    flow_component =  create_gmflow_model(load_weights=True).to(model.device)
-    model.model.vision_model.optical_flow = flow_component
-
-    if True: #'only' in args.train_mode:
-        freeze_layers(model,args.train_mode)
 
 
-   
+ 
+    adjust_architecture(model,args)
+
 
     dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
-    #print(dataset)
-    #print(f"prompt:  {dataset[0]['generated_prompt']}, video: {dataset['origin_video_path']}")
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
     processor.tokenizer.additional_special_tokens.index("<image>")
     ]
+
     num_train_epochs=10
 
     training_args = TrainingArguments(
@@ -402,7 +379,7 @@ def train_w_movement(args):
         save_strategy="steps",
         save_steps=200,
         save_total_limit=3,
-        optim="adamw_hf" if quant==False else "paged_adamw_8bit", # for 8-bit, keep paged_adamw_8bit, else adamw_hf
+        optim="adamw_torch" if quant==False else "paged_adamw_8bit", # for 8-bit, keep paged_adamw_8bit, else adamw_hf
         bf16=True,
         
         #resume_from_checkpoint=True,
@@ -418,23 +395,45 @@ def train_w_movement(args):
     )
     #resume_from_checkpoint=True
     withExtended = True
-    num_frames = 10 if "500M" in args.model_size else 20
+    num_frames = 10 if "500M" in args.model_size else 30
     withBlur = False
-    data_collator_fn = partial(collate_fn, image_token_id=image_token_id, model=model, processor=processor, withBlur = withBlur, extended=withExtended, num_frames=num_frames)  
+    data_collator_fn = partial(collate_fn, 
+                               image_token_id=image_token_id, 
+                               model=model, 
+                               processor=processor, 
+                               withBlur = withBlur, 
+                               extended=withExtended, 
+                               num_frames=num_frames,
+                               use_cfg = 'cfg' in args.mode,
+                               use_optFlow = 'optFlow' in args.mode)  
 
    
 
-    trainer = CustomTrainer(
-    model=model,
-    args=training_args,
-    data_collator= data_collator_fn,
-    train_dataset=dataset,
-    callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
-    )
 
-    
-    trainer.train() #resume_from_checkpoint=True
+   
 
+    if "optFlow" in args.mode:
+        trainer = CustomTrainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
+        )
+    else:
+        trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
+        )
+
+
+    if args.resume:
+        trainer.train(resume_from_checkpoint=True) #resume_from_checkpoint=True
+    else:
+        trainer.train()
 
 
 if __name__ == "__main__":
