@@ -531,8 +531,8 @@ def eval(args):
                 #exit(1)
                 
                 
-                pred_tracks = torch.load("conditioned_models/co-tracker/pred_tracks.pt")
-                pred_visibility = torch.load("conditioned_models/co-tracker/pred_visibility.pt")
+                pred_tracks = torch.load("conditioned_models/cotracker/pred_tracks.pt")
+                pred_visibility = torch.load("conditioned_models/cotracker/pred_visibility.pt")
                 
                 print(pred_tracks.shape)
                 print(pred_tracks[:,indices,:,:].shape)

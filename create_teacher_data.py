@@ -7,7 +7,6 @@ import glob
 import config
 import argparse
 import os
-os.environ['MPLCONFIGDIR'] = '/home/ai_center/ai_users/yardenbakish/'
 
 import re
 from transformers import AutoProcessor, AutoModelForImageTextToText
@@ -370,7 +369,7 @@ def create_tracks(args):
         subdirs = file.readlines()
 
 
-    subdirs = [name for name in os.listdir(output_dir) if (os.path.isdir(os.path.join(dataset_dir, name)) and pattern.match(name))] 
+    subdirs = [name for name in os.listdir(output_dir) if (pattern.match(name))] 
     
     subdirs = [row.strip().split("/")[-1] for row in subdirs]
     sorted_subdirs = sorted(subdirs, key=lambda x: int(pattern.search(x).group(1)))
@@ -388,15 +387,15 @@ def create_tracks(args):
         video_path = f"{output_dir}/{dir}/video_original.mp4"
         if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
             continue
-
-        print(output_rep_dir)
+        if os.path.exists(f"{output_rep_dir}/pred_tracks_online.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility_online.pt"):
+            continue
+        print(output_rep_dir,flush=True)
+       
 
         os.makedirs(output_rep_dir, exist_ok=True)
-        try:
-            generate_track_reps(video_path, output_rep_dir, is_random=False)
-        except:
-            print(f"FAILED {output_rep_dir}")
-            pass
+       
+        generate_track_reps(video_path, output_rep_dir, is_random=False)
+       
         
         #generate_movement_reps(args, sample_dir, output_rep_dir,step)
 
@@ -431,6 +430,7 @@ if __name__ == "__main__":
     elif args.mode == "create_movement_reps":
         create_movement_reps(args)   
     elif args.mode == "create_tracks":
+        print("MADE IT")
         create_tracks(args)   
 
     elif args.mode == "check_for_missing":

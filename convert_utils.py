@@ -9,6 +9,8 @@ import ast
 import pandas as pd
 from conditioned_models.FlowFormerPlusPlus.visualize_flow import extract_images,visualize_flow,build_model
 from conditioned_models.cotracker.generate_track import generate_track
+from conditioned_models.cotracker.generate_track_online import generate_track_online
+
 
 from modules.FlowFormer.cfg import get_cfg
 import torch
@@ -390,7 +392,18 @@ def generate_movement_reps(args, input_dir,output_dir,step):
         plt.imsave( f'{output_dir}/image_{i}.jpg'  ,motion_reps[i])
     '''
 def generate_track_reps(video_path, output_dir, is_random=False):
-    generate_track(video_path, output_dir, is_random=False)
+
+    duration = VideoFileClip(video_path).duration
+    if False:
+       
+        generate_track_online(video_path, output_dir, is_random=False)
+        
+
+    else:
+        generate_track(video_path, output_dir, is_random=False)
+
+
+
 
 
 
