@@ -3,11 +3,11 @@
 #SBATCH --job-name=train            # Job name
 #SBATCH --account=gpu-tad-users # Account name
 #SBATCH --partition=gpu-tad     # Partition name
-#SBATCH --time=00:30:00               # Max run time (hh:mm:ss)
+#SBATCH --time=11:59:00               # Max run time (hh:mm:ss)
 #SBATCH --ntasks=1                    # Number of tasks
 #SBATCH --nodes=1                     # Number of nodes
 #SBATCH --cpus-per-task=4             # CPUs per task
-#SBATCH --mem-per-cpu=10G              # Memory per CPU
+#SBATCH --mem-per-cpu=100G              # Memory per CPU
 #SBATCH --output=slurm_logs/train.out        # Output file
 #SBATCH --error=slurm_logs/train.err         # Error file
 #SBATCH --gres=gpu:1 
@@ -15,4 +15,4 @@
 
 
 
-python train_w_movement.py --model-size 2.2B
+python train_w_movement.py 

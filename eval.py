@@ -5,7 +5,6 @@ TODO
 
 '''
 import os
-os.environ['MPLCONFIGDIR'] = '/scratch200/yardenbakish/'
 
 import config
 import argparse
@@ -17,16 +16,14 @@ from transformers.modeling_utils import load_sharded_checkpoint
 from safetensors.torch import load_file
 import torch
 from convert_utils import *
-#os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pandas as pd
 from datasets import load_dataset
 from torch.nn.utils.rnn import pad_sequence
 from functools import partial
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
-#from model import SmolVLMForConditionalGeneration
 from model_optical_flow import SmolVLMForConditionalGeneration
 
-
+#from model import SmolVLMForConditionalGeneration
 
 
 
@@ -34,24 +31,14 @@ import config
 import argparse
 
 import matplotlib.font_manager as fm
-'''
-font_paths = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-for path in font_paths:
-    print(path)
-exit(1)
-
-'''
 from moviepy.editor import *
 
 
-import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from transformers import AutoProcessor, AutoModelForImageTextToText
 import torch
-
-
 from processing_smolvlm import SmolVLMProcessor
 
 
@@ -69,53 +56,30 @@ SAMPLES_TO_TEST = [
 #"GOT-10k_Val_000085",
 #"GOT-10k_Val_000107",
 #"GOT-10k_Val_000132",
-
-
 #"GOT-10k_Val_000014",
 #"GOT-10k_Val_000017",
 #"GOT-10k_Val_000022",
 
-
 ]
 
 
-
-def get_last_checkpoint_dir(directory):
-    largest_number = -1
-    largest_file = None
-
-    # List all files in the directory
-    for filename in os.listdir(directory):
-        # Check if the file matches the pattern 'file_<number>'
-        match = re.match(r'checkpoint-(\d+)', filename)
-        if match:
-            # Extract the number part from the filename and convert it to an integer
-            number = int(match.group(1))
-            # Update the largest file if the current number is larger
-            if number > largest_number:
-                largest_number = number
-                largest_file = filename
-
-    if largest_file:
-        return os.path.join(directory, largest_file)
-    else:
-        print("No suitable file found")
-
-        return False  # No file found that matches the pattern
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Distillation of SmolVLM2-500M-Video-Instruct for poor-apperance sequence')
 
     parser.add_argument('--mode', type=str,
-                                choices=['uniform_blur', 
+                                choices=[
+                                    
+                                        'cfg_cap', 'cfg_BB', 'cfg_optflow_cap', 'cfg_optflow_BB',
+                                         'uniform_blur', 
                                          'uniform_blur_extended',  
                                          'BB_w_blur','BB_w_blur2', 
                                          'BB_w_blur_extended', 
                                          'cfg',
                                          'caption_optical_flow',
                                          'BB_optical_flow'],
-                                default = 'uniform_blur',
+                                default = 'cfg_cap',
                                 help='')
     
     parser.add_argument('--compare-mode', type=str,
@@ -125,7 +89,7 @@ def parse_args():
 
     parser.add_argument('--model-size', type=str,
                                 choices=['500M', '2.2B', '2.2B_quant'],
-                                default = '500M',
+                                default = '2.2B',
                                 help='')
    
 
@@ -134,32 +98,29 @@ def parse_args():
     config.get_config(args)
 
    
-    work_dir      = f'{args.mode}/{args.model_size}'
-    distilled_dir = f'{args.paths["distilled_models"]}/{work_dir}'
-    eval_dir      = f"eval/{work_dir}" if args.compare_mode == "standard" else f"eval/seqVSsingle/{work_dir}"
+    work_dir         = f'{args.mode}/{args.model_size}'
+    finedtuned_dir   = f'{args.paths["finetuned_models"]}/{work_dir}'
+    eval_dir         = f"eval/{work_dir}" if args.compare_mode == "standard" else f"eval/seqVSsingle/{work_dir}"
     os.makedirs(eval_dir,exist_ok=True)
+    
     args.eval_dir = eval_dir
-    if args.mode == "BB_w_blur":
+    if "BB" in args.mode:
         args.orig_dir = get_last_checkpoint_dir(f'{args.paths["distilled_models"]}/BB/{args.model_size}')
     else:
         args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    args.distiled_dir = args.orig_dir # get_last_checkpoint_dir(distilled_dir)
+    args.finetuned_dir = get_last_checkpoint_dir(finedtuned_dir)
     
 
-
-    args.prompt_orig = "Describe this video in detail" if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
-    args.prompt_distil = "Caption the video." if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
+    args.prompt_orig     = "Describe this video in detail" if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
+    args.prompt_finetune = "Caption the video." if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
 
 
     args.extended = True
     args.num_frames = 20
     args.extend_frames = None
 
-    if "extended" in args.mode:
-        args.extended = True
-        args.num_frames = 20 if "500M" in args.model_size else 20
+    if  args.compare_mode == 'single_frame':
         args.extend_frames = True
-
 
     return args
 
@@ -169,10 +130,10 @@ def parse_args():
 def gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict,compare_mode="standard"):
 
     model_type1 = "orig" if compare_mode=="standard" else "per_frame"
-    model_type2 = "distilled" if compare_mode=="standard" else "sequence"
+    model_type2 = "finetuned" if compare_mode=="standard" else "sequence"
     
     text_row1 = "Original" if compare_mode=="standard" else "per_frame"
-    text_row2 = "Distilled" if compare_mode=="standard" else "sequence"
+    text_row2 = "finetuned" if compare_mode=="standard" else "sequence"
 
 
     videos_types = ["original", "blur_object","blur_full"]
@@ -196,6 +157,7 @@ def gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict,compare_mod
 
 
 
+
 def create_text_image(text, width, font_size=50, bg_color=(0, 0, 0), text_color=(255, 255, 255), padding=10):
     """
     Create an image containing text with the specified width.
@@ -214,7 +176,7 @@ def create_text_image(text, width, font_size=50, bg_color=(0, 0, 0), text_color=
     # Use default font with specified size
     # Note: PIL's default font doesn't support custom sizes well
     # So we'll adjust other parameters to make the text more prominent
-    font = ImageFont.truetype("FreeSansBold.ttf", font_size)
+    font = ImageFont.truetype("/usr/share/fonts/dejavu-sans-fonts/DejaVuSansCondensed-Bold.ttf", font_size)
 
     
     # Create a temporary image to calculate text dimensions
@@ -403,78 +365,89 @@ def visualize(inputs,bbox=None, indices = None,vis_pred=False, save_im = True):
 
 
 
+def configure_options(args, model_type):
+    d = {}
+    if model_type == "orig": 
+        d["model_path"] = args.orig_dir
+        d["prompt"]     = args.prompt_orig
+    else:
+        d["model_path"] = args.finetuned_dir
+        d["prompt"]     = args.prompt_finetune
+    
+    d["use_cfg"] = ("cfg" in args.mode and model_type != "orig")
+    d["use_optflow"] = ("optflow" in args.mode and model_type != "orig")
+    return d
+
+
+
+
 def eval(args):
-    model_types = ["orig",   "distilled",  ]
-    processor_path = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    model_types           = ["orig",   "finetuned",  ]
+    processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     explainations_compare = []
-    video_to_compare      = ["video_blur_full.mp4"]
     prompt                = ""
-    normalized_bbox                  = None
 
 
     torch.manual_seed(42)
     np.random.seed(42)
 
-    explainations_compare_dict   = {"distilled": {}, "orig": {}}
-    inputs_dict                 = {}
-    ext = "labels_w_BB.csv" if "BB" in args.mode else "labels.csv"
+    explainations_compare_dict   = {"finetuned": {}, "orig": {}}
+    inputs_dict                  = {}
+
+    #ext = "labels_w_BB.csv" if "BB" in args.mode else "labels.csv"
     for model_type in model_types:
-        if model_type == "orig": #False:
-            model_path = args.orig_dir
-            prompt = args.prompt_orig
-        else:
-            model_path = args.distiled_dir
-            prompt = args.prompt_distil
+        ops = configure_options(args, model_type)
+        model_path  = ops["model_path"]
+        prompt      = ops["prompt"]
+        use_cfg     = ops["use_cfg"]
+        use_optflow = ops["use_optflow"]
+
+       
+        print(prompt)
         
-        if "BB" in args.mode:
-            processor = SmolVLMProcessor.from_pretrained(processor_path)
-        else:
-            processor = SmolVLMProcessor.from_pretrained(processor_path)
+        print(model_path)
+        print(use_cfg)
+        print(use_optflow)
+        print("--------------")
 
-        #config = AutoConfig.from_pretrained(model_path)
-        #config.pixel_shuffle_factor = 15
-        #config.scale_factor = 15
-
- 
-
+       
+        processor = SmolVLMProcessor.from_pretrained(processor_path)
+        
         model = SmolVLMForConditionalGeneration.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            use_cfg = False,
+            use_cfg = use_cfg,
+            use_optflow = use_optflow,
+
 
          #   config = config
             #_attn_implementation="flash_attention_2"
         ).to("cuda")
 
         
-        if False:
-            for name, param in model.model.vision_model.named_parameters():
-                #print(name)
-                if 'attentional_splatting.W_out' in name:
-                    param.data.zero_()
+        #if False:
+        #    for name, param in model.model.vision_model.named_parameters():
+        #        #print(name)
+        #        if 'attentional_splatting.W_out' in name:
+        #            param.data.zero_()
 
-
-          
        
-        if False:
-            flow_component =  create_gmflow_model(load_weights=True)#create_optical_flow_model()
-            model.model.vision_model.optical_flow = flow_component
+        #if False:
+        #    flow_component =  create_gmflow_model(load_weights=True)#create_optical_flow_model()
+        #    model.model.vision_model.optical_flow = flow_component
      
         
         #config = AutoConfig.from_pretrained(model_path)
         #model = SmolVLMForConditionalGeneration(config).to("cuda").to(torch.bfloat16)
-        #state_dict = load_file(f"{model_path}/model.safetensors")
-        #model.load_state_dict(state_dict)
-        #model = model.to(torch.bfloat16).to("cuda")
         #exit(1)
       
         for sample in SAMPLES_TO_TEST:
 
-            explainations = [None,None,None]
-            videos = ["video_original.mp4", "video_blur_object.mp4","video_blur_full.mp4"]
-            paths = [f"dataset/GOT10KVAL_teacher/{sample}/{videos[i]}" for i in range(3)]
+            videos        = ["video_blur_full.mp4", ] #"video_blur_object.mp4","video_blur_full.mp4"
+            explainations = [None for i in range(len(videos))]
+            paths         = [f"dataset/GOT10KVAL_teacher/{sample}/{videos[i]}" for i in range(len(videos))]
 
-            normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
+            #normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
             output_dir = f'{args.eval_dir}/{sample}' 
           
             os.makedirs(output_dir,  exist_ok=True)
@@ -495,23 +468,8 @@ def eval(args):
                 #processor.image_processor.video_sampling["max_frames"] = 1
                 #print(processor)
                 #print("\n\n")
-                if "BB" in args.mode:
-                    inputs, indices = processor.apply_chat_template(
-                        messages,
-                        add_generation_prompt=True,
-                        tokenize=True,
-                        return_dict=True,
-                        return_tensors="pt",
-                        return_frame_indices = True,
-                        extended        = args.extended,
-                        num_frames       = args.num_frames,
-                        #do_resize     = False
-                    )
-                   
-                    print(indices)
 
-                else:
-                    inputs, indices = processor.apply_chat_template(
+                inputs, indices = processor.apply_chat_template(
                         messages,
                         add_generation_prompt=True,
                         tokenize=True,
@@ -519,7 +477,6 @@ def eval(args):
                         return_tensors="pt",
                         extended        = args.extended,
                         return_frame_indices = True,
-
                         num_frames       = args.num_frames,
                         #do_resize     = False
                     )
@@ -527,26 +484,18 @@ def eval(args):
                 
                 inputs = inputs.to(model.device, dtype=torch.bfloat16)
                 #visualize(inputs,bbox=normalized_bbox,indices=indices)
-                #exit(1)
-                print(inputs.pixel_values.shape)
-                print("-----------")
-                #exit(1)
+               
                 
-                
-                pred_tracks = torch.load(f"debug_tracks/{sample}/pred_tracks.pt")
+                pred_tracks     = torch.load(f"debug_tracks/{sample}/pred_tracks.pt")
                 pred_visibility = torch.load(f"debug_tracks/{sample}/pred_visibility.pt")
                 
-                print(pred_tracks.shape)
-                print(pred_tracks[:,indices,:,:].shape)
-                
-
-
+               
                 inputs['pred_tracks'] = pred_tracks[:,indices,:,:].to(dtype=torch.bfloat16)
                 inputs['pred_visibility'] = pred_visibility
 
                
 
-                generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=1024)
+                generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=256)
 
                 
                 generated_texts = processor.batch_decode(
@@ -555,19 +504,14 @@ def eval(args):
                 )
                 #print("HREE")
                 explaination = generated_texts[0].split("Assistant: ")[-1]
-                print(explaination)
-                exit(1)
+                
+                print(explaination,flush = True)
                 
                 #visualize(inputs,bbox=parse_loc_string(explaination),indices=indices,vis_pred=True)
 
               
-                #print(explaination)
-                #exit(1)
-               
                 explainations[i] = explaination
 
-                #print(explaination)
-                #exit(1)
                 if sample not in inputs_dict:
                     inputs_dict[sample] = []
                 inputs_dict[sample].append(inputs)
@@ -575,20 +519,39 @@ def eval(args):
            
             explainations_compare_dict[model_type][sample] = explainations
 
-            if "BB" not in args.mode:
-                create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
+            #if "BB" not in args.mode:
+            #    create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
 
         #explainations_compare.append(explainations[0])
         #paths = [paths[0],paths[0]]
     #print("\n\n")
-    #explainations_compare[0] = f"Distilled: {explainations_compare[0]}"
+    #explainations_compare[0] = f"Finetuned: {explainations_compare[0]}"
     #explainations_compare[1] = f"Standard: {explainations_compare[1]}"
 
     #print(paths)
 
+    # FOR COMPARING BETWEEN VIDEOS
     #create_video_with_text(paths, explainations_compare, f"{output_dir}/final_vid_compare.mp4")
-    if "BB" in args.mode:
-        gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict)
+    
+    # FOR COMPARING MODELS
+
+    for sample in explainations_compare_dict["orig"].keys():
+        explain_baseline_original =  f"Standard: {explainations_compare_dict['orig'][sample]}" 
+        explain_finetuned_original = f"Finetuned: {explainations_compare_dict['finetuned'][sample]}" 
+
+
+        print(explain_finetuned_original,flush = True)
+        print("\n\n")
+        print(explain_baseline_original,flush = True)
+
+
+        explainations_models = [explain_baseline_original, explain_finetuned_original]
+        create_video_with_text([paths[0],paths[0]], explainations_models, f"{output_dir}/compare_models.mp4")
+
+
+
+    #if "BB" in args.mode:
+    #    gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict)
 
 
 
@@ -606,8 +569,8 @@ def eval_sequence_vs_single(args):
     inputs_dict                 = {}
     ext = "labels_w_BB.csv" if "BB" in args.mode else "labels.csv"
     for model_type in model_types:
-        model_path = args.distiled_dir
-        prompt = args.prompt_distil
+        model_path = args.finetuned_dir
+        prompt = args.prompt_finetune
         
         if "BB" in args.mode:
             processor = SmolVLMProcessor.from_pretrained(processor_path)
@@ -706,7 +669,7 @@ def eval_sequence_vs_single(args):
                
                 
                     inputs = inputs.to(model.device, dtype=torch.bfloat16)
-                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=1024)
+                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=256)
                     generated_texts = processor.batch_decode(
                         generated_ids,
                         skip_special_tokens=True,
@@ -729,14 +692,14 @@ def eval_sequence_vs_single(args):
         #explainations_compare.append(explainations[0])
         #paths = [paths[0],paths[0]]
     #print("\n\n")
-    #explainations_compare[0] = f"Distilled: {explainations_compare[0]}"
-    #explainations_compare[1] = f"Standard: {explainations_compare[1]}"
+    explainations_compare[0] = f"finetuned: {explainations_compare[0]}"
+    explainations_compare[1] = f"Standard: {explainations_compare[1]}"
 
     #print(paths)
 
-    #create_video_with_text(paths, explainations_compare, f"{output_dir}/final_vid_compare.mp4")
-    if "BB" in args.mode:
-        gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict, compare_mode="single_frame")
+    create_video_with_text(paths, explainations_compare, f"{output_dir}/final_vid_compare.mp4")
+    #if "BB" in args.mode:
+    #    gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict, compare_mode="single_frame")
 
 
 

@@ -141,7 +141,7 @@ class LossLoggerCallback(TrainerCallback):
 
 
 
-def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_frames, use_cfg, use_optFlow):
+def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_frames, use_cfg, use_optflow):
     pattern = re.compile(r'.*_(\d+)$')
     
     videoPath = "origin_video_path" if withBlur==False else "blur_full_video_path"
@@ -170,7 +170,7 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
         target_H = dummy_instance["pixel_values"].shape[-2]
         target_W = dummy_instance["pixel_values"].shape[-1]
         
-        if use_optFlow:
+        if use_optflow:
             example_flow_maps = collect_optical_flow(examples,example, videoPath, indices, target_W, target_H)
             all_flow_maps.append(example_flow_maps)
         else:
@@ -196,7 +196,7 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
         instances.append(instance)
 
     optical_flow_maps = None
-    if use_optFlow:
+    if use_optflow:
         optical_flow_maps = pad_optical_flow(all_flow_maps)
 
 
@@ -275,9 +275,12 @@ def collate_fn(examples,image_token_id,model,processor, withBlur, extended, num_
 
 
 def adjust_architecture(model, args):
+
+  
+
     if "optflow" in args.mode :
         if args.resume != True:
-            flow_component =  create_gmflow_model(load_weights=args.resume == True).to(model.device)
+            flow_component =  create_gmflow_model(load_weights=args.resume != True).to(model.device)
             model.model.vision_model.optical_flow = flow_component
 
         for name, param in model.named_parameters():
@@ -288,14 +291,28 @@ def adjust_architecture(model, args):
             #else:
             #    param.requires_grad = False
 
+    
     if "cfg" in args.mode:
         for name, param in model.named_parameters():
-            if 'trackTention' not in name:
+            if 'vision_model.encoder' not in name and 'trackTention' not in name and 'head' not in name and "optical_flow" not in name and 'movement_vector_predictor' not in name:
                 param.requires_grad = False
 
-            if 'attentional_splatting.W_out' in name and args.resume != True:
-                param.data.zero_()
+            #if 'attentional_splatting.W_out' in name and args.resume != True:
+            #    param.data.zero_()
     
+
+    for name, param in model.named_parameters():
+        if param.requires_grad == True:
+    #        print(name)
+            if "vision_model" in name:
+                param.register_hook(lambda g, n=name: print(n, g.norm().item()))
+
+    #        if "model.vision_model.encoder.trajectory_layers" in name:
+    #            print("TRUE")
+    #            param.register_hook(lambda g, n=name: print(n, g.norm().item()))
+
+
+   
     #for param in model.model.vision_model.parameters():
     #    param.requires_grad = False
         #param.requires_grad = False
@@ -346,7 +363,7 @@ def train_w_movement(args):
             model_id,
             torch_dtype=torch.bfloat16,
             use_cfg = "cfg" in args.mode,
-            use_optFlow = "optFlow" in args.mode
+            use_optflow = "optflow" in args.mode
             #_attn_implementation="flash_attention_2",
         ).to("cuda")
         #for name, param in model.model.vision_model.named_parameters():
@@ -362,15 +379,18 @@ def train_w_movement(args):
 
 
     dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
+    dataset = dataset.shuffle(seed=42).select(range(100))
+   
+
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
     processor.tokenizer.additional_special_tokens.index("<image>")
     ]
 
-    num_train_epochs=10
+    num_train_epochs=100
 
     training_args = TrainingArguments(
         num_train_epochs= num_train_epochs,   #num_train_epochs,                  #5
-        per_device_train_batch_size=16, #16
+        per_device_train_batch_size=4, #16
         gradient_accumulation_steps=1,
         warmup_steps=50,
         learning_rate=1e-4,
@@ -395,7 +415,7 @@ def train_w_movement(args):
     )
     #resume_from_checkpoint=True
     withExtended = True
-    num_frames = 10 if "500M" in args.model_size else 30
+    num_frames = 10 if "500M" in args.model_size else 20
     withBlur = False
     data_collator_fn = partial(collate_fn, 
                                image_token_id=image_token_id, 
@@ -405,14 +425,14 @@ def train_w_movement(args):
                                extended=withExtended, 
                                num_frames=num_frames,
                                use_cfg = 'cfg' in args.mode,
-                               use_optFlow = 'optFlow' in args.mode)  
+                               use_optflow = 'optflow' in args.mode)  
 
    
 
 
    
 
-    if "optFlow" in args.mode:
+    if True:
         trainer = CustomTrainer(
         model=model,
         args=training_args,

@@ -656,9 +656,12 @@ def collect_tracks(example, videoPath, indices, target_W, target_H):
     tracks_path = example[videoPath].split("/")[:-1]
     tracks_path = "/".join(tracks_path)
     tracks_path = f"{tracks_path}/tracks_grid"
-    pred_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
-    pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt")
-
+    try:
+        pred_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
+        pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt")
+    except:
+        pred_tracks     = torch.load(f"{tracks_path}/pred_tracks_online.pt")
+        pred_visibility = torch.load(f"{tracks_path}/pred_visibility_online.pt")
 
     
 
@@ -682,3 +685,27 @@ def collect_tracks(example, videoPath, indices, target_W, target_H):
 
     
     
+
+
+def get_last_checkpoint_dir(directory):
+    largest_number = -1
+    largest_file = None
+
+    # List all files in the directory
+    for filename in os.listdir(directory):
+        # Check if the file matches the pattern 'file_<number>'
+        match = re.match(r'checkpoint-(\d+)', filename)
+        if match:
+            # Extract the number part from the filename and convert it to an integer
+            number = int(match.group(1))
+            # Update the largest file if the current number is larger
+            if number > largest_number:
+                largest_number = number
+                largest_file = filename
+
+    if largest_file:
+        return os.path.join(directory, largest_file)
+    else:
+        print("No suitable file found")
+
+        return False  # No file found that matches the pattern

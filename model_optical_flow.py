@@ -20,7 +20,7 @@ from transformers.models.auto import AutoModel
 from configuration_smolvlm import SmolVLMConfig, SmolVLMVisionConfig
 from convert_utils import flow_to_image
 from modules.gmflow.gmflow.gmflow import GMFlow
-from modules.tracktention import TracktentionLayer
+from modules.tracktention import TracktentionLayer, MovementVectorPredictor
 import json
 
 
@@ -107,6 +107,7 @@ class SmolVLMVisionEmbeddings(nn.Module):
         self.num_patches = self.num_patches_per_side**2
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+  
 
     def forward(self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
@@ -287,25 +288,13 @@ class TrajectoryEncoderLayer(nn.Module):
         sqrt_P = int(P**0.5)
         new_shape = (*prefix, sqrt_P, sqrt_P, D)
 
-        
-        print("START")
-        print(f"PRED TRACKS: {pred_tracks.shape}" )
-        
-
-        
-
         hidden_states =  self.trackTention(hidden_states.view(*new_shape),pred_tracks)
-
+    
         hidden_states =   residual + hidden_states
        
-        #print(torch.allclose(hidden_states, residual))
-
-        
+        #print(torch.allclose(hidden_states, residual)
         outputs = (hidden_states,)
-
-    
         return outputs
-
 
 
 
@@ -476,6 +465,7 @@ class SmolVLMEncoder(nn.Module):
             if (self.use_cfg and 
                 trajectory_layer_idx < len(self.trajectory_positions) and 
                 layer_idx == self.trajectory_positions[trajectory_layer_idx]):
+               
                 
                 if self.gradient_checkpointing and self.training:
                     trajectory_outputs = self._gradient_checkpointing_func(
@@ -508,7 +498,7 @@ class SmolVLMEncoder(nn.Module):
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
 
-
+        
         if not return_dict:
             return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
         return BaseModelOutput(
@@ -526,15 +516,19 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
     def __init__(self, config: SmolVLMVisionConfig):
         super().__init__(config)
         embed_dim = config.hidden_size
-       
+        
         self.embeddings = SmolVLMVisionEmbeddings(config)
         self.encoder = SmolVLMEncoder(config)
         self.patch_size = config.patch_size
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self.use_cfg = config.use_cfg
+        self.use_optflow = config.use_optflow
 
-        self.use_optFlow = config.use_optFlow
-        if config.use_optFlow:
+        if config.use_cfg:
+            self.movement_vector_predictor =  MovementVectorPredictor(config)
+
+        if config.use_optflow:
 
             self.optical_flow = GMFlow(feature_channels=128,
                        num_scales=1,
@@ -551,7 +545,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
                 input_spatial_size = (32,32)
                 output_spatial_size = 64
 
-            self.vis_to_flow = VisionToFlowTransformGM(input_dim=config.hidden_size, input_spatial_size=input_spatial_size, output_spatial_size=output_spatial_size)
+                self.vis_to_flow = VisionToFlowTransformGM(input_dim=config.hidden_size, input_spatial_size=input_spatial_size, output_spatial_size=output_spatial_size)
 
 
 
@@ -614,8 +608,21 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
 
         last_hidden_state = encoder_outputs[0]
 
+
+
+
         optical_maps_pred = []
-        if self.use_optFlow:
+
+        #TEMPORAL
+        if self.use_cfg:
+            
+            loss_rec =  self.movement_vector_predictor(last_hidden_state,pred_tracks, pred_visibility )
+           
+
+            optical_maps_pred = [loss_rec]
+
+
+        if self.use_optflow:
             flow_states =  self.vis_to_flow(last_hidden_state.view(pixel_values_copy.shape[0],pixel_values_copy.shape[1],*last_hidden_state.shape[1:]))
 
 
@@ -905,12 +912,12 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
     in forward. Instead, we override inputs_merger here with custom logic.
     """
 
-    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optFlow : False):
+    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optflow : False):
         super().__init__(config)
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
         config.vision_config.use_cfg     = True if use_cfg else False
-        config.vision_config.use_optFlow = True if use_optFlow else False
+        config.vision_config.use_optflow = True if use_optflow else False
 
        
         self.vision_model = SmolVLMVisionTransformer._from_config(config.vision_config)
@@ -1174,9 +1181,9 @@ class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config, use_cfg=False, use_optFlow = False):
+    def __init__(self, config, use_cfg=False, use_optflow = False):
         super().__init__(config)
-        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optFlow = use_optFlow)
+        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optflow = use_optflow)
         self.image_token_id = self.config.image_token_id
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.vocab_size = config.text_config.vocab_size
@@ -1360,6 +1367,12 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             )
           
 
+        #TEMPORAL
+        if (pred_tracks is not None ) and (outputs.optical_maps_pred):
+            optical_loss = outputs.optical_maps_pred[0]
+            print(optical_loss)
+            
+
 
         if (optical_flow_maps is not None) and (outputs.optical_maps_pred):
             optical_flow_maps = optical_flow_maps.permute(1, 0, 2, 3, 4) 
@@ -1398,8 +1411,8 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             pass  
 
        
-
         
+
         if cap_loss is not None and optical_loss is None:
             loss = cap_loss
         
@@ -1408,6 +1421,8 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         else:
             loss = None
         
+
+       
         #if outputs.optical_maps_pred is not None:
         #    #print(len(outputs.optical_maps_pred))
         #    #print(outputs.optical_maps_pred[0].shape)
@@ -1415,7 +1430,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         #    #print("is NAN")
         ##print(loss)
         #exit(1)
-
+        print(loss)
 
         return SmolVLMCausalLMOutputWithPast(
             loss=loss,

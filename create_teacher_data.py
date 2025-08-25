@@ -376,7 +376,7 @@ def create_tracks(args):
     num_subdirs_per_partition = int(len(sorted_subdirs) // PARTITIONS)
     paritioned_subdirs = sorted_subdirs[args.partition * num_subdirs_per_partition : (args.partition+1)*num_subdirs_per_partition]
     
-    #paritioned_subdirs  = sorted_subdirs
+    paritioned_subdirs  = sorted_subdirs
     
     
     
