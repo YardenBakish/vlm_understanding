@@ -8,7 +8,7 @@ from moviepy.editor import *
 import ast
 import pandas as pd
 from conditioned_models.FlowFormerPlusPlus.visualize_flow import extract_images,visualize_flow,build_model
-from conditioned_models.cotracker.generate_track import generate_track
+from conditioned_models.cotracker.generate_track import generate_track, generate_mov_from_track
 from conditioned_models.cotracker.generate_track_online import generate_track_online
 
 
@@ -404,6 +404,145 @@ def generate_track_reps(video_path, output_dir, is_random=False):
 
 
 
+def generate_track_mov_reps(input_path, output_dir, is_random=False):
+    video_path = f"{input_path}/video_original.mp4"
+    tracks_path = f"{input_path}/tracks_grid"
+    BB_path = f"{input_path}/groundtruth.txt"
+
+    generate_mov_from_track(video_path, tracks_path, BB_path, output_dir)
+        
+
+
+
+
+
+
+
+
+
+
+def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, target_H):
+    
+    tracks_path = videoPath.split("/")[:-1]
+    tracks_path = "/".join(tracks_path)
+    tracks_path = f"{tracks_path}/tracks_grid"
+
+    try:
+        pred_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
+        pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt")
+    except:
+        pred_tracks     = torch.load(f"{tracks_path}/pred_tracks_online.pt")
+        pred_visibility = torch.load(f"{tracks_path}/pred_visibility_online.pt")
+
+    
+    original_h, original_w = (512,512)
+
+    scale_x = target_W / original_w
+    scale_y = target_H / original_h
+    scale_factors = torch.tensor([scale_x, scale_y], 
+                                device=pred_tracks.device, 
+                                dtype=pred_tracks.dtype)
+
+    pred_tracks = pred_tracks * scale_factors
+
+
+
+
+    pred_tracks = pred_tracks[:,indices,:,:].to(dtype=torch.bfloat16)         # [1, 30, N, 2]
+    pred_visibility = pred_visibility[:,indices,:] # [1, 30, N]
+
+
+    diffs = pred_tracks[:, 1:] - pred_tracks[:, :-1]  # [1, 29, N, 2]
+    inner_means = []  # per step t
+    outer_means = []
+
+    for t in range(diffs.shape[1]):
+        vb = (pred_visibility[0, t] & pred_visibility[0, t + 1])
+        x1_t, y1_t, x2_t, y2_t = bboxes[t]
+        x1_n, y1_n, x2_n, y2_n = bboxes[t + 1]
+
+        bbox_t_valid = (x1_t != -1) and (y1_t != -1) and (x2_t != -1) and (y2_t != -1)
+        bbox_n_valid = (x1_n != -1) and (y1_n != -1) and (x2_n != -1) and (y2_n != -1)
+    
+    # coords at t and t+1 (float)
+        xy_t   = pred_tracks[0, t]     # [N,2]
+        xy_n   = pred_tracks[0, t + 1] # [N,2]
+        diff_t = diffs[0, t]        # [N,2]
+
+        # in-bbox tests (inclusive)
+        in_t = (xy_t[:, 0] >= x1_t) & (xy_t[:, 0] <= x2_t) & \
+               (xy_t[:, 1] >= y1_t) & (xy_t[:, 1] <= y2_t)
+        in_n = (xy_n[:, 0] >= x1_n) & (xy_n[:, 0] <= x2_n) & \
+               (xy_n[:, 1] >= y1_n) & (xy_n[:, 1] <= y2_n)
+
+        inner_mask = (vb & in_t & in_n)         # [N] bool
+        outer_mask = ~inner_mask                # rest
+
+        # means (fallback to zero vector if empty)
+        if inner_mask.any():
+            inner_mean = diff_t[inner_mask].mean(dim=0)
+        elif bbox_t_valid and bbox_n_valid:
+            # Fallback: use bounding box center shift when no visible points in bbox
+            center_t = torch.tensor([(x1_t + x2_t) / 2, (y1_t + y2_t) / 2], 
+                                   dtype=torch.float32)
+            center_n = torch.tensor([(x1_n + x2_n) / 2, (y1_n + y2_n) / 2], 
+                                   dtype=torch.float32)
+            inner_mean = center_n - center_t
+        else:
+            inner_mean = torch.zeros(2, dtype=torch.float32)
+        if outer_mask.any():
+            outer_mean = diff_t[outer_mask].mean(dim=0)
+        else:
+            outer_mean = torch.zeros(2, dtype=torch.float32)
+
+        inner_means.append(inner_mean)
+        outer_means.append(outer_mean)
+    
+    return inner_means, outer_means
+    
+    for t in range(diffs.shape[1]):
+        x1_t, y1_t, x2_t, y2_t = bboxes[t]
+        im_inner = inner_means[t].float().cpu().numpy().astype(np.float32)  # (2,)
+        im_outer = outer_means[t].float().cpu().numpy().astype(np.float32)  # (2,)
+
+        flow = np.empty((target_H, target_W, 2), dtype=np.float32)
+        flow[:, :, 0] = im_outer[0]
+        flow[:, :, 1] = im_outer[1]
+        # overwrite bbox region with inner mean
+        if (x2_t > x1_t) and (y2_t > y1_t):
+            flow[y1_t:y2_t, x1_t:x2_t, 0] = im_inner[0]
+            flow[y1_t:y2_t, x1_t:x2_t, 1] = im_inner[1]
+
+        flow_img = flow_to_image(flow)
+        frame = video[0, t].permute(1, 2, 0).cpu().float().numpy()  # [H,W,C]
+        frame = (frame - frame.min()) / (frame.max() - frame.min())
+        frame = np.float32(frame)
+        frame =  np.uint8(255 * frame)
+
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+        # Ensure both are same color ordering
+        if flow_img.shape[2] == 3 and frame.shape[2] == 3:
+            # Convert frame to BGR for OpenCV consistency
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # Flow is usually in RGB — convert to BGR if needed
+            flow_bgr = cv2.cvtColor(flow_img, cv2.COLOR_RGB2BGR)
+
+            print(flow_bgr.shape)
+            print(frame_bgr.shape)
+
+
+            # Blend
+            blended = cv2.addWeighted(frame_bgr, 1 - 0.6, flow_bgr, 0.6, 0)
+
+            cv2.imwrite(f"to_del/img{t}.png", blended)
+
+    exit(1)
+
+
+
+
+
 
 
 
@@ -650,12 +789,14 @@ def pad_optical_flow(all_flow_maps):
     return optical_flow_maps
 
 
-def collect_tracks(example, videoPath, indices, target_W, target_H):
+def collect_tracks(example, videoPath, indices, target_W, target_H,skip_parse=False):
     
-
-    tracks_path = example[videoPath].split("/")[:-1]
-    tracks_path = "/".join(tracks_path)
-    tracks_path = f"{tracks_path}/tracks_grid"
+    if skip_parse == False:
+        tracks_path = example[videoPath].split("/")[:-1]
+        tracks_path = "/".join(tracks_path)
+        tracks_path = f"{tracks_path}/tracks_grid"
+    else:
+        tracks_path = videoPath
     try:
         pred_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
         pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt")

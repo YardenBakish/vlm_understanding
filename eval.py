@@ -5,6 +5,7 @@ TODO
 
 '''
 import os
+from pathlib import Path
 
 import config
 import argparse
@@ -44,7 +45,7 @@ from processing_smolvlm import SmolVLMProcessor
 
 
 SAMPLES_TO_TEST = [
-#"GOT-10k_Val_000001",
+"GOT-10k_Val_000001",
 #"GOT-10k_Val_000003",
 #"GOT-10k_Val_000006",
 #"GOT-10k_Val_000007",
@@ -52,7 +53,7 @@ SAMPLES_TO_TEST = [
 #"GOT-10k_Val_000018",
 #"GOT-10k_Val_000027",
 #"GOT-10k_Val_000029",
-"GOT-10k_Val_000030",
+#"GOT-10k_Val_000030",
 #"GOT-10k_Val_000085",
 #"GOT-10k_Val_000107",
 #"GOT-10k_Val_000132",
@@ -64,27 +65,21 @@ SAMPLES_TO_TEST = [
 
 
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Distillation of SmolVLM2-500M-Video-Instruct for poor-apperance sequence')
 
     parser.add_argument('--mode', type=str,
                                 choices=[
-                                    
-                                        'cfg_cap', 'cfg_BB', 'cfg_optflow_cap', 'cfg_optflow_BB',
-                                         'uniform_blur', 
-                                         'uniform_blur_extended',  
-                                         'BB_w_blur','BB_w_blur2', 
-                                         'BB_w_blur_extended', 
-                                         'cfg',
-                                         'caption_optical_flow',
-                                         'BB_optical_flow'],
-                                default = 'cfg_cap',
+                                        'distil_BB_extended', 'distil_optFlow_extended',
+                                        'finetune_cfg_cap', 'finetune_cfg_BB',
+                                        'finetune_cfg_optflow_cap', 'finetune_cfg_optflow_BB'
+                                        ],
+                                default = 'distil_BB_extended',
                                 help='')
     
     parser.add_argument('--compare-mode', type=str,
-                                choices=['standard', 'single_frame'],
-                                default = 'standard',
+                                choices=['vis', 'metric'],
+                                default = 'vis',
                                 help='')
 
     parser.add_argument('--model-size', type=str,
@@ -97,46 +92,62 @@ def parse_args():
     args = parser.parse_args()
     config.get_config(args)
 
+    args.mode        = "_".join(args.mode.split("_")[1:])
    
     work_dir         = f'{args.mode}/{args.model_size}'
-    finedtuned_dir   = f'{args.paths["finetuned_models"]}/{work_dir}'
-    eval_dir         = f"eval/{work_dir}" if args.compare_mode == "standard" else f"eval/seqVSsingle/{work_dir}"
+    args.dir_type    = args.mode.split("_")[0]
+    if args.dir_type =="finetune":
+        args.dir_type = "finetuned_models"
+    else:
+        args.dir_type = "distilled_models"
+
+    finedtuned_dir   = f'{args.paths[args.dir_type]}/{work_dir}'
+    eval_dir         = f"eval/{work_dir}" if args.compare_mode == "vis" else f"eval/seqVSsingle/{work_dir}"
     os.makedirs(eval_dir,exist_ok=True)
-    
     args.eval_dir = eval_dir
+
     if "BB" in args.mode:
-        args.orig_dir = get_last_checkpoint_dir(f'{args.paths["distilled_models"]}/BB/{args.model_size}')
+        args.orig_dir = get_last_checkpoint_dir(f'{args.paths["distilled_models"]}/BB_extended/{args.model_size}')
     else:
         args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    args.finetuned_dir = get_last_checkpoint_dir(finedtuned_dir)
     
+    print(finedtuned_dir)
+    args.finetuned_dir =  get_last_checkpoint_dir(finedtuned_dir) #  #args.orig_dir
 
+    
+    
     args.prompt_orig     = "Describe this video in detail" if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
-    args.prompt_finetune = "Caption the video." if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
+    
+    if "BB" in args.mode:
+        args.prompt_finetune = "Return xyxy coordinates for the object in the video"
+    elif args.dir_type == "distilled_models" and "optFlow" in args.mode:
+         args.prompt_finetune = "Return xy motion vectors for the object and camera in the video"
+    else:
+        args.prompt_finetune = "Caption the video."
 
 
+   
+    #torch.manual_seed(42)
+    #np.random.seed(42)
     args.extended = True
-    args.num_frames = 20
-    args.extend_frames = None
-
-    if  args.compare_mode == 'single_frame':
-        args.extend_frames = True
+    args.num_frames = 30
+    #args.extend_frames = None
 
     return args
 
 
 
 
-def gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict,compare_mode="standard"):
+def gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict,compare_mode="BB"):
 
-    model_type1 = "orig" if compare_mode=="standard" else "per_frame"
-    model_type2 = "finetuned" if compare_mode=="standard" else "sequence"
+    model_type1 = "orig" 
+    model_type2 = "finetuned" 
     
-    text_row1 = "Original" if compare_mode=="standard" else "per_frame"
-    text_row2 = "finetuned" if compare_mode=="standard" else "sequence"
+    text_row1 = "Original"
+    text_row2 = "finetuned" 
 
 
-    videos_types = ["original", "blur_object","blur_full"]
+    videos_types = ["original", "blur_full"]
     rev_d = {}
     for model_type in explainations_compare_dict.keys():
         for sample in explainations_compare_dict[model_type]:
@@ -144,17 +155,30 @@ def gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict,compare_mod
                 rev_d[sample] = {}
             rev_d[sample][model_type] = explainations_compare_dict[model_type][sample]
 
+    #between models
+    if compare_mode == "BB":
+        for sample in rev_d:
+            output_dir = f'{args.eval_dir}/{sample}'
+            for i in range(len(videos_types)):
+                orig_pred_images      =  visualize(inputs_dict[sample][i],pred=parse_loc_string(rev_d[sample][model_type1][i]),indices=None,vis_pred=True, save_im = False, vis = compare_mode)
+                distilles_pred_images =  visualize(inputs_dict[sample][i],pred=parse_loc_string(rev_d[sample][model_type2][i]),indices=None,vis_pred=True, save_im = False, vis = compare_mode)
+
+                if orig_pred_images == -1 or distilles_pred_images == -1:
+                    continue
+
+                save_image_grid(orig_pred_images, distilles_pred_images, f"{output_dir}/{videos_types[i]}_compare_models.png", text_row1=text_row1, text_row2=text_row2)
+    
+    #for the finetuned model
     for sample in rev_d:
         output_dir = f'{args.eval_dir}/{sample}'
-        for i in range(len(videos_types)):
-            orig_pred_images      =  visualize(inputs_dict[sample][i],bbox=parse_loc_string(rev_d[sample][model_type1][i]),indices=None,vis_pred=True, save_im = False)
-            distilles_pred_images =   visualize(inputs_dict[sample][i],bbox=parse_loc_string(rev_d[sample][model_type2][i]),indices=None,vis_pred=True, save_im = False)
-            
-            if orig_pred_images == -1 or distilles_pred_images == -1:
-                continue
-            
-            save_image_grid(orig_pred_images, distilles_pred_images, f"{output_dir}/{videos_types[i]}_compare.png", text_row1=text_row1, text_row2=text_row2)
-
+      
+        orig_pred_images      =  visualize(inputs_dict[sample][0],pred=parse_loc_string(rev_d[sample][model_type2][0]),indices=None,vis_pred=True, save_im = False)
+        blurry_pred_images =   visualize(inputs_dict[sample][1],pred=parse_loc_string(rev_d[sample][model_type2][1]),indices=None,vis_pred=True, save_im = False)
+        
+        if orig_pred_images == -1 or blurry_pred_images == -1:
+            continue
+        
+        save_image_grid(orig_pred_images, blurry_pred_images, f"{output_dir}/compare_model_blur.png", text_row1=text_row1, text_row2=text_row2)
 
 
 
@@ -314,48 +338,49 @@ def create_video_with_text(video_files, text_list, output_path):
 
 
 
-def visualize(inputs,bbox=None, indices = None,vis_pred=False, save_im = True):
+def visualize(inputs,pred=None, indices = None,vis_pred=False, save_im = True, compare_mode="BB"):
     inputs = inputs.pixel_values.squeeze(0)
     H, W = inputs.shape[-2], inputs.shape[-1]
-    bbox = np.array(bbox)
-    #bbox_len = len(bbox)
+    pred = np.array(pred)
+    #pred_len = len(pred)
     if vis_pred == False:
-        indices[-1] = min(indices[-1], len(bbox)-1) 
-        bbox = bbox[indices]
+        indices[-1] = min(indices[-1], len(pred)-1) 
+        pred = pred[indices]
    
     else:
-        if len(bbox) < inputs.shape[0]:
+        if len(pred) < inputs.shape[0]:
             print("NOT ENOUGH BBOXES")
             return -1
    
     images_w_BB = []
     for i in range(inputs.shape[0]):
-        
-        numbers = re.findall(r'<loc(\d+)>', bbox[i])
-        y_min, x_min, y_max, x_max = map(int, numbers)
-        print(x_min)
-        x_min *= (W / 1024)
-        y_min *= (H / 1024)
-        x_max *= (W / 1024)
-        y_max *= (H / 1024)
-        
-        x_min =  int(x_min)
-        y_min =  int(y_min)
-        x_max =  int(x_max)
-        y_max =  int(y_max)
-
 
         x = inputs[i,:,:,:]
-       
         x = x.permute(1, 2, 0)
         x = x.cpu().float().numpy()
         x = (x - x.min()) / (x.max() - x.min())
         x = np.float32(x)
         x =  np.uint8(255 * x)
         x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
-
         
-        cv2.rectangle(x, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2) 
+        if compare_mode=="BB":
+            numbers = re.findall(r'<loc(\d+)>', pred[i])
+            y_min, x_min, y_max, x_max = map(int, numbers)
+            x_min *= (W / 1024)
+            y_min *= (H / 1024)
+            x_max *= (W / 1024)
+            y_max *= (H / 1024)
+
+            x_min =  int(x_min)
+            y_min =  int(y_min)
+            x_max =  int(x_max)
+            y_max =  int(y_max)
+            cv2.rectangle(x, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2) 
+        else:
+            pass
+
+
+
         x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
         images_w_BB.append(x)
         if save_im:
@@ -380,16 +405,20 @@ def configure_options(args, model_type):
 
 
 
+# we want to both compare variants but also compare performance on blurry vs not blurry video
+# the only compare right now - (1) evertyhing finetuned vs not (2) distilled but only after optical flow
 
-def eval(args):
-    model_types           = ["orig",   "finetuned",  ]
+# we want to ouput videos per-model, only if we do caption
+# if we it is BB/ optical flow we do something else
+#also applies for between models
+
+
+def vis(args):
+    model_types           = ["finetuned",   "orig",    ]
     processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     explainations_compare = []
     prompt                = ""
 
-
-    torch.manual_seed(42)
-    np.random.seed(42)
 
     explainations_compare_dict   = {"finetuned": {}, "orig": {}}
     inputs_dict                  = {}
@@ -403,35 +432,32 @@ def eval(args):
         use_optflow = ops["use_optflow"]
 
        
-        print(prompt)
-        
-        print(model_path)
-        print(use_cfg)
-        print(use_optflow)
-        print("--------------")
-
-       
         processor = SmolVLMProcessor.from_pretrained(processor_path)
-        
-        model = SmolVLMForConditionalGeneration.from_pretrained(
+
+        if args.dir_type == "distilled_models":
+            model = AutoModelForImageTextToText.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            use_cfg = use_cfg,
-            use_optflow = use_optflow,
-
-
-         #   config = config
-            #_attn_implementation="flash_attention_2"
+            #_attn_implementation="flash_attention_2",
         ).to("cuda")
 
+        else:
+            model = SmolVLMForConditionalGeneration.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                use_cfg = False,
+                use_optflow = use_optflow,
+             #   config = config
+                #_attn_implementation="flash_attention_2"
+            ).to("cuda")
         
+
         #if False:
         #    for name, param in model.model.vision_model.named_parameters():
         #        #print(name)
         #        if 'attentional_splatting.W_out' in name:
         #            param.data.zero_()
 
-       
         #if False:
         #    flow_component =  create_gmflow_model(load_weights=True)#create_optical_flow_model()
         #    model.model.vision_model.optical_flow = flow_component
@@ -443,7 +469,7 @@ def eval(args):
       
         for sample in SAMPLES_TO_TEST:
 
-            videos        = ["video_blur_full.mp4", ] #"video_blur_object.mp4","video_blur_full.mp4"
+            videos        = ["video_original.mp4", "video_blur_full.mp4" ] #"video_blur_object.mp4",
             explainations = [None for i in range(len(videos))]
             paths         = [f"dataset/GOT10KVAL_teacher/{sample}/{videos[i]}" for i in range(len(videos))]
 
@@ -483,31 +509,33 @@ def eval(args):
                 
                 
                 inputs = inputs.to(model.device, dtype=torch.bfloat16)
-                #visualize(inputs,bbox=normalized_bbox,indices=indices)
+                #visualize(inputs,pred=normalized_bbox,indices=indices)
                
                 
-                pred_tracks     = torch.load(f"debug_tracks/{sample}/pred_tracks.pt")
-                pred_visibility = torch.load(f"debug_tracks/{sample}/pred_visibility.pt")
-                
-               
-                inputs['pred_tracks'] = pred_tracks[:,indices,:,:].to(dtype=torch.bfloat16)
-                inputs['pred_visibility'] = pred_visibility
+                if use_cfg:
+                    pred_tracks, pred_visibility = collect_tracks(None, f"debug_tracks/{sample}", 
+                                          indices, 
+                                          inputs.pixel_values.shape[-1], 
+                                          inputs.pixel_values.shape[-2],
+                                          skip_parse=True)
+
+                    inputs['pred_tracks'] = pred_tracks
+                    inputs['pred_visibility'] = pred_visibility
 
                
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=1024)
 
-                generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=256)
-
-                
                 generated_texts = processor.batch_decode(
                     generated_ids,
                     skip_special_tokens=True,
                 )
-                #print("HREE")
                 explaination = generated_texts[0].split("Assistant: ")[-1]
-                
                 print(explaination,flush = True)
+                exit(1)
+                print("\n\n")
                 
-                #visualize(inputs,bbox=parse_loc_string(explaination),indices=indices,vis_pred=True)
+                #visualize(inputs,pred=parse_loc_string(explaination),indices=indices,vis_pred=True)
 
               
                 explainations[i] = explaination
@@ -519,8 +547,16 @@ def eval(args):
            
             explainations_compare_dict[model_type][sample] = explainations
 
-            #if "BB" not in args.mode:
-            #    create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
+        if "BB" not in args.mode:
+            create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
+        
+        
+        #TODO  adjust visualize for the optical flow
+        #TODO visualize in a different way BB and optical flow for blurry vs. not blurry
+        #TODO run the optical flow variant vs. standard
+        
+
+
 
         #explainations_compare.append(explainations[0])
         #paths = [paths[0],paths[0]]
@@ -535,23 +571,26 @@ def eval(args):
     
     # FOR COMPARING MODELS
 
-    for sample in explainations_compare_dict["orig"].keys():
-        explain_baseline_original =  f"Standard: {explainations_compare_dict['orig'][sample]}" 
-        explain_finetuned_original = f"Finetuned: {explainations_compare_dict['finetuned'][sample]}" 
+    if "BB" not in args.mode:
+        for sample in SAMPLES_TO_TEST:
+            for j in range(len(explainations)):
+                ext = "_blurry" if "blur" in videos[j] else ""
 
+                explain_baseline_original =  f"Standard: {explainations_compare_dict['orig'][sample][j]}" 
+                explain_finetuned_original = f"Finetuned: {explainations_compare_dict['finetuned'][sample][j]}" 
 
-        print(explain_finetuned_original,flush = True)
-        print("\n\n")
-        print(explain_baseline_original,flush = True)
-
-
-        explainations_models = [explain_baseline_original, explain_finetuned_original]
-        create_video_with_text([paths[0],paths[0]], explainations_models, f"{output_dir}/compare_models.mp4")
+                explainations_models = [explain_baseline_original, explain_finetuned_original]
+                create_video_with_text([paths[j],paths[j]], explainations_models, f"{output_dir}/compare_models{ext}.mp4")
+    
+        if "optFlow" in args.mode:
+            gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict,compare_mode="optFlow")
+    else:
+        gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict)
 
 
 
     #if "BB" in args.mode:
-    #    gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict)
+    #    gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict)
 
 
 
@@ -559,39 +598,86 @@ def eval(args):
 
 
 
+#BB - blurry vs. standard
+#optical - blurry vs. standard
+# optical+blurry vs. standard
+#optical+blurry vs. standard
 
-def eval_sequence_vs_single(args):
-    model_types = ["per_frame", "sequence", ]
-    processor_path = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    prompt                = ""
+#rest - finetuned
 
-    explainations_compare_dict   = {"sequence": {}, "per_frame": {}}
-    inputs_dict                 = {}
-    ext = "labels_w_BB.csv" if "BB" in args.mode else "labels.csv"
+def eval(args):
+
+    test_dir = Path("dataset/GOT10KVAL_teacher")
+    subdirs = sorted([d for d in test_dir.iterdir() if d.is_dir()])
+    video_files_list = []
+    video_blur_files_list = []
+
+    for subdir in subdirs:
+        file_video_path = subdir / "video_original.mp4"
+        file_video_blur_path = subdir / "video_blur_full.mp4"
+        if file_video_path.exists():
+            video_files_list.append(str(f"{test_dir}/{file_video_path.relative_to(test_dir)}"))
+            video_blur_files_list.append(str(f"{test_dir}/{file_video_blur_path.relative_to(test_dir)}"))
+
+   
+    
+    all_video_files_list = [video_files_list, video_blur_files_list]
+
+    if args.mode == "optFlow" not in args.mode:
+        model_types           = [ "finetuned",    ]
+    else:
+        model_types           = ["finetuned",   "orig",    ]
+
+    processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    
+  
     for model_type in model_types:
-        model_path = args.finetuned_dir
-        prompt = args.prompt_finetune
-        
-        if "BB" in args.mode:
-            processor = SmolVLMProcessor.from_pretrained(processor_path)
-        else:
-            processor = AutoProcessor.from_pretrained(processor_path)
+        ops = configure_options(args, model_type)
+        model_path  = ops["model_path"]
+        prompt      = ops["prompt"]
+        use_cfg     = ops["use_cfg"]
+        use_optflow = ops["use_optflow"]
+       
+        processor = SmolVLMProcessor.from_pretrained(processor_path)
 
-        
-
-        model = SmolVLMForConditionalGeneration.from_pretrained(
+        if args.dir_type == "distilled_models":
+            model = AutoModelForImageTextToText.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-         #   config = config
-            #_attn_implementation="flash_attention_2"
+            #_attn_implementation="flash_attention_2",
         ).to("cuda")
-     
-        for sample in SAMPLES_TO_TEST:
 
-            explainations = [None,None,None]
-            videos = ["video_original.mp4", "video_blur_object.mp4","video_blur_full.mp4"]
-            paths = [f"dataset/GOT10KVAL_teacher/{sample}/{videos[i]}" for i in range(3)]
+        else:
+            model = SmolVLMForConditionalGeneration.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                use_cfg = False,
+                use_optflow = use_optflow,
+            ).to("cuda")
+        
 
+        for i in range(len(all_video_files_list)):
+            if i == 0:
+                video_type = "standard"
+            else:
+                video_type = "blur"
+            videos_lst = all_video_files_list[i]
+            for video_path in videos_lst:
+                subdir = "/".join(video_path.split("/")[:-1])
+                groundTruthPath =  os.path.join(subdir,"groundtruth.txt")
+                metaInfoPath =  os.path.join(subdir,"meta_info.ini")
+                print(groundTruthPath)
+                print(metaInfoPath)
+                exit(1)
+               
+
+
+
+            videos        = ["video_original.mp4", "video_blur_full.mp4" ] #"video_blur_object.mp4",
+            explainations = [None for i in range(len(videos))]
+            paths         = [f"dataset/GOT10KVAL_teacher/{sample}/{videos[i]}" for i in range(len(videos))]
+
+            #normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
             output_dir = f'{args.eval_dir}/{sample}' 
           
             os.makedirs(output_dir,  exist_ok=True)
@@ -612,7 +698,6 @@ def eval_sequence_vs_single(args):
                 #processor.image_processor.video_sampling["max_frames"] = 1
                 #print(processor)
                 #print("\n\n")
-              
 
                 inputs, indices = processor.apply_chat_template(
                         messages,
@@ -620,65 +705,45 @@ def eval_sequence_vs_single(args):
                         tokenize=True,
                         return_dict=True,
                         return_tensors="pt",
+                        extended        = args.extended,
                         return_frame_indices = True,
-                        extended        = args.extended,
                         num_frames       = args.num_frames,
                         #do_resize     = False
-                )
-
-
-
-                if model_type == "per_frame":
-                    BBs_per_frame = []
-                    for idx in indices:
-                 
-                        inputs_per_frame = processor.apply_chat_template(
-                        messages,
-                        add_generation_prompt=True,
-                        tokenize=True,
-                        return_dict=True,
-                        return_tensors="pt",
-                        selected_index       = idx,
-                        extended        = args.extended,
-                        num_frames       = args.num_frames,
-                        #do_resize     = False
-                        )
-
-
-
-                        if args.extend_frames:
-                            inputs_per_frame.pixel_values = inputs_per_frame.pixel_values.repeat(1, 10, 1, 1, 1)
-
-                        
-                        inputs_per_frame = inputs_per_frame.to(model.device, dtype=torch.bfloat16)
-                        print("REACHED")
-
-                        generated_ids = model.generate(**inputs_per_frame, do_sample=False, max_new_tokens=1024)
-                        generated_texts = processor.batch_decode(
-                            generated_ids,
-                            skip_special_tokens=True,
-                        )
-                        explaination_per_frame = generated_texts[0].split("Assistant: ")[-1]
-                        explaination_per_frame = explaination_per_frame.split(";")[0]
-                        BBs_per_frame.append(explaination_per_frame)
-                        
-                    explaination = ";".join(BBs_per_frame)
-                else:
-
-                   
+                    )
+                
+                
+                inputs = inputs.to(model.device, dtype=torch.bfloat16)
+                #visualize(inputs,pred=normalized_bbox,indices=indices)
                
                 
-                    inputs = inputs.to(model.device, dtype=torch.bfloat16)
-                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=256)
-                    generated_texts = processor.batch_decode(
-                        generated_ids,
-                        skip_special_tokens=True,
-                    )
-                    explaination = generated_texts[0].split("Assistant: ")[-1]
+                if use_cfg:
+                    pred_tracks, pred_visibility = collect_tracks(None, f"debug_tracks/{sample}", 
+                                          indices, 
+                                          inputs.pixel_values.shape[-1], 
+                                          inputs.pixel_values.shape[-2],
+                                          skip_parse=True)
 
+                    inputs['pred_tracks'] = pred_tracks
+                    inputs['pred_visibility'] = pred_visibility
+
+               
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=1024)
+
+                generated_texts = processor.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                )
+                explaination = generated_texts[0].split("Assistant: ")[-1]
+                print(explaination,flush = True)
+                exit(1)
+                print("\n\n")
+                
+                #visualize(inputs,pred=parse_loc_string(explaination),indices=indices,vis_pred=True)
+
+              
                 explainations[i] = explaination
 
- 
                 if sample not in inputs_dict:
                     inputs_dict[sample] = []
                 inputs_dict[sample].append(inputs)
@@ -686,21 +751,50 @@ def eval_sequence_vs_single(args):
            
             explainations_compare_dict[model_type][sample] = explainations
 
-            if "BB" not in args.mode:
-                create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
+        if "BB" not in args.mode:
+            create_video_with_text(paths, explainations, f"{output_dir}/final_vid_{model_type}.mp4")
+        
+        
+        #TODO  adjust visualize for the optical flow
+        #TODO visualize in a different way BB and optical flow for blurry vs. not blurry
+        #TODO run the optical flow variant vs. standard
+        
+
+
 
         #explainations_compare.append(explainations[0])
         #paths = [paths[0],paths[0]]
     #print("\n\n")
-    explainations_compare[0] = f"finetuned: {explainations_compare[0]}"
-    explainations_compare[1] = f"Standard: {explainations_compare[1]}"
+    #explainations_compare[0] = f"Finetuned: {explainations_compare[0]}"
+    #explainations_compare[1] = f"Standard: {explainations_compare[1]}"
 
     #print(paths)
 
-    create_video_with_text(paths, explainations_compare, f"{output_dir}/final_vid_compare.mp4")
-    #if "BB" in args.mode:
-    #    gen_comparisons_w_BB(args,explainations_compare_dict,inputs_dict, compare_mode="single_frame")
+    # FOR COMPARING BETWEEN VIDEOS
+    #create_video_with_text(paths, explainations_compare, f"{output_dir}/final_vid_compare.mp4")
+    
+    # FOR COMPARING MODELS
 
+    if "BB" not in args.mode:
+        for sample in SAMPLES_TO_TEST:
+            for j in range(len(explainations)):
+                ext = "_blurry" if "blur" in videos[j] else ""
+
+                explain_baseline_original =  f"Standard: {explainations_compare_dict['orig'][sample][j]}" 
+                explain_finetuned_original = f"Finetuned: {explainations_compare_dict['finetuned'][sample][j]}" 
+
+                explainations_models = [explain_baseline_original, explain_finetuned_original]
+                create_video_with_text([paths[j],paths[j]], explainations_models, f"{output_dir}/compare_models{ext}.mp4")
+    
+        if "optFlow" in args.mode:
+            gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict,compare_mode="optFlow")
+    else:
+        gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict)
+
+
+
+    #if "BB" in args.mode:
+    #    gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict)
 
 
 
@@ -709,10 +803,11 @@ def eval_sequence_vs_single(args):
 if __name__ == "__main__":
     args          = parse_args()
     config.get_config(args)
-    if args.compare_mode == "standard":
+    if args.compare_mode == "vis":
+        vis(args)
+    else:
         eval(args)
-    elif args.compare_mode == "single_frame":
-        eval_sequence_vs_single(args)
+
 
 
 

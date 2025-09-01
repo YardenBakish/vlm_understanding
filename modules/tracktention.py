@@ -163,7 +163,7 @@ class AttentionalSampling(nn.Module):
 
         
         # Project to queries and keys
-        Q = self.W_q(track_tokens)  # [T, M, d_k]
+        Q = self.W_q(track_tokens)  # [T, M, d_k]   
         K = self.W_k(features)      # [T, HW, d_k]
 
 
@@ -695,3 +695,115 @@ class CrossAttentionLayer(nn.Module):
         
         # Residual connection
         return output
+
+
+
+
+
+
+
+class LatentRegulaizer(nn.Module):
+    """Complete Tracktention Layer combining all components."""
+    
+    def __init__(self, config, num_heads: int = 8, 
+                 num_transformer_layers: int = 1, dropout: float = 0.0):
+        super().__init__()
+
+        self.embed_dim = config.hidden_size
+        self.patch_size = 14
+
+        self.max_points = 900
+
+
+    def create_feature_positions(self, H: int, W: int, device: torch.device) -> torch.Tensor:
+        """Create grid positions for feature map tokens accounting for patch size."""
+        # Create grid coordinates in patch space, then scale to actual image coordinates
+        y, x = torch.meshgrid(torch.arange(H, device=device), 
+                             torch.arange(W, device=device), indexing='ij')
+        
+        # Scale by patch size to get actual image coordinates
+        # Assuming patches are centered, add half patch size for center coordinates
+        x = x.flatten().float() * self.patch_size + self.patch_size // 2
+        y = y.flatten().float() * self.patch_size + self.patch_size // 2
+        
+        positions = torch.stack([x, y], dim=-1)  # [HW, 2]
+        return positions
+
+    def map_point_to_patch(self, feature_positions: torch.Tensor, tracks: torch.Tensor):
+        """
+        Args:
+            feature_positions: [HW, 2]
+            tracks: [B, T, M, 2]
+        Returns:
+            nn_idx: [B, T, M] -> indices of nearest patches
+        """
+        HW = feature_positions.shape[0]
+        # Compute squared distances
+        diff = tracks.unsqueeze(-2) - feature_positions.view(1, 1, 1, HW, 2)
+        dist_sq = (diff ** 2).sum(-1)   # [B, T, M, HW]
+        nn_idx = dist_sq.argmin(-1)     # [B, T, M]
+        return nn_idx
+
+
+    
+    def forward(self, features: torch.Tensor, tracks: torch.Tensor, visibility: torch.Tensor):
+        """
+        features: [B*T, H, W, d_model]
+        tracks: [B, T, M, 2]
+        visibility: [B, T, M]
+        """
+
+        *prefix, P, D = features.shape
+        sqrt_P = int(P**0.5)
+        new_shape = (*prefix, sqrt_P, sqrt_P, D)
+        features = features.view(*new_shape)
+
+        B, T, M, _ = tracks.shape
+        _, H, W, d_model = features.shape
+        HW = H * W
+
+        # [HW, 2] patch centers
+        feature_positions = self.create_feature_positions(H, W, features.device)
+
+        # Map each point → nearest patch index
+        nn_idx = self.map_point_to_patch(feature_positions, tracks)   # [B,T,M]
+
+        # Flatten features for indexing
+        features = features.view(B, T, H*W, d_model)  # [B,T,HW,d]
+
+        # Gather embeddings at point locations
+        # nn_idx: [B,T,M] → expand for gather
+        point_features = features.gather(
+            2, nn_idx.unsqueeze(-1).expand(-1, -1, -1, d_model)
+        )   # [B, T, M, d_model]
+
+        # =========================
+        # 1) Consecutive differences
+        # =========================
+        f_t     = point_features[:, :-1]   # [B,T-1,M,d]
+        f_next  = point_features[:, 1:]    # [B,T-1,M,d]
+
+        vis_t    = visibility[:, :-1]      # [B,T-1,M]
+        vis_next = visibility[:, 1:]       # [B,T-1,M]
+
+        mask_consec = (vis_t & vis_next).unsqueeze(-1)  # [B,T-1,M,1]
+
+        diff_consec = ((f_t - f_next).abs()).sum(-1)     # [B,T-1,M]
+        diff_consec = diff_consec * mask_consec.squeeze(-1)
+
+        # =========================
+        # 2) Difference from first frame
+        # =========================
+        f_first = point_features[:, 0:1]   # [B,1,M,d]
+        vis_first = visibility[:, 0:1]     # [B,1,M]
+
+        f_rest = point_features[:, 1:]     # [B,T-1,M,d]
+        vis_rest = visibility[:, 1:]       # [B,T-1,M]
+
+        mask_ref = (vis_first & vis_rest).unsqueeze(-1) # [B,T-1,M,1]
+
+        diff_ref = ((f_rest - f_first).abs()).sum(-1)    # [B,T-1,M]
+        diff_ref = diff_ref * mask_ref.squeeze(-1)
+
+
+        return 0.01* diff_consec.mean() + 0.01*diff_ref.mean()

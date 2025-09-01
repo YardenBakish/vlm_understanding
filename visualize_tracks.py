@@ -22,13 +22,13 @@ DEFAULT_DEVICE = (
 )
 
 
-def visualize_track(video_dir, output_dir, is_random=False):
+def visualize_track(video_dir,tracks_path, output_dir, is_random=False):
 
     video_path = f"{video_dir}/video_original.mp4"
     debug_dir = f'debug_tracks/{video_dir.split("/")[-1]}' 
 
-    pred_tracks = torch.load(f"{debug_dir}/pred_tracks.pt", map_location=torch.device('cpu'))
-    pred_visibility = torch.load(f"{debug_dir}/pred_visibility.pt", map_location=torch.device('cpu'))
+    pred_tracks = torch.load(f"{tracks_path}/pred_tracks.pt", map_location=torch.device('cpu'))
+    pred_visibility = torch.load(f"{tracks_path}/pred_visibility.pt", map_location=torch.device('cpu'))
 
     video = read_video_from_path(video_path)
     video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
@@ -52,7 +52,9 @@ def visualize_track(video_dir, output_dir, is_random=False):
     )
    
 
+num = "001148"
+video_dir = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}"
+tracks_path = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/tracks_grid"
 
-video_dir = "dataset/GOT10KVAL_teacher/GOT-10k_Val_000085"
 output_dir = "saved_videos"
-visualize_track(video_dir, output_dir, is_random=True)
+visualize_track(video_dir,tracks_path, output_dir, is_random=True)

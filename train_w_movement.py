@@ -297,16 +297,15 @@ def adjust_architecture(model, args):
             if 'vision_model.encoder' not in name and 'trackTention' not in name and 'head' not in name and "optical_flow" not in name and 'movement_vector_predictor' not in name:
                 param.requires_grad = False
 
-            #if 'attentional_splatting.W_out' in name and args.resume != True:
-            #    param.data.zero_()
+            if 'attentional_splatting.W_out' in name and args.resume != True:
+                param.data.zero_()
     
 
-    for name, param in model.named_parameters():
-        if param.requires_grad == True:
-    #        print(name)
-            if "vision_model" in name:
-                param.register_hook(lambda g, n=name: print(n, g.norm().item()))
-
+    #for name, param in model.named_parameters():
+    #    if param.requires_grad == True:
+    #        if "vision_model" in name:
+    #            param.register_hook(lambda g, n=name: print(n, g.norm().item()))
+#
     #        if "model.vision_model.encoder.trajectory_layers" in name:
     #            print("TRUE")
     #            param.register_hook(lambda g, n=name: print(n, g.norm().item()))
@@ -379,14 +378,14 @@ def train_w_movement(args):
 
 
     dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
-    dataset = dataset.shuffle(seed=42).select(range(100))
+    #dataset = dataset.shuffle(seed=42).select(range(100))
    
 
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
     processor.tokenizer.additional_special_tokens.index("<image>")
     ]
 
-    num_train_epochs=100
+    num_train_epochs=10
 
     training_args = TrainingArguments(
         num_train_epochs= num_train_epochs,   #num_train_epochs,                  #5

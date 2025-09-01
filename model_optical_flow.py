@@ -20,7 +20,7 @@ from transformers.models.auto import AutoModel
 from configuration_smolvlm import SmolVLMConfig, SmolVLMVisionConfig
 from convert_utils import flow_to_image
 from modules.gmflow.gmflow.gmflow import GMFlow
-from modules.tracktention import TracktentionLayer, MovementVectorPredictor
+from modules.tracktention import TracktentionLayer, MovementVectorPredictor, LatentRegulaizer
 import json
 
 
@@ -467,7 +467,7 @@ class SmolVLMEncoder(nn.Module):
                 layer_idx == self.trajectory_positions[trajectory_layer_idx]):
                
                 
-                if self.gradient_checkpointing and self.training:
+                if False:
                     trajectory_outputs = self._gradient_checkpointing_func(
                         self.trajectory_layers[trajectory_layer_idx].__call__,
                         hidden_states,
@@ -526,7 +526,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         self.use_optflow = config.use_optflow
 
         if config.use_cfg:
-            self.movement_vector_predictor =  MovementVectorPredictor(config)
+            self.movement_vector_predictor =  LatentRegulaizer(config)
 
         if config.use_optflow:
 
@@ -614,7 +614,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         optical_maps_pred = []
 
         #TEMPORAL
-        if self.use_cfg:
+        if self.use_cfg and self.training:
             
             loss_rec =  self.movement_vector_predictor(last_hidden_state,pred_tracks, pred_visibility )
            
@@ -1422,7 +1422,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             loss = None
         
 
-       
+        
         #if outputs.optical_maps_pred is not None:
         #    #print(len(outputs.optical_maps_pred))
         #    #print(outputs.optical_maps_pred[0].shape)
@@ -1430,7 +1430,9 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         #    #print("is NAN")
         ##print(loss)
         #exit(1)
-        print(loss)
+        
+        if self.training:
+            print(loss)
 
         return SmolVLMCausalLMOutputWithPast(
             loss=loss,
