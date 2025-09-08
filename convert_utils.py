@@ -8,7 +8,7 @@ from moviepy.editor import *
 import ast
 import pandas as pd
 from conditioned_models.FlowFormerPlusPlus.visualize_flow import extract_images,visualize_flow,build_model
-from conditioned_models.cotracker.generate_track import generate_track, generate_mov_from_track
+from conditioned_models.cotracker.generate_track import generate_track, generate_mov_from_track, generate_track_cuts
 from conditioned_models.cotracker.generate_track_online import generate_track_online
 
 
@@ -391,16 +391,20 @@ def generate_movement_reps(args, input_dir,output_dir,step):
     for i in range(len(motion_reps)):
         plt.imsave( f'{output_dir}/image_{i}.jpg'  ,motion_reps[i])
     '''
-def generate_track_reps(video_path, output_dir, is_random=False):
+def generate_track_reps(video_path, output_dir,cuts=False, is_random=False):
 
-    duration = VideoFileClip(video_path).duration
-    if duration > 20:
-       
-        generate_track_online(video_path, output_dir, is_random=False)
+    
+    if cuts == False:
+        duration = VideoFileClip(video_path).duration
+        if duration > 20:
         
+            generate_track_online(video_path, output_dir, is_random=False)
 
+        else:
+            generate_track(video_path, output_dir, is_random=False)
     else:
-        generate_track(video_path, output_dir, is_random=False)
+        generate_track_cuts(video_path, output_dir, is_random=False)
+
 
 
 
@@ -421,7 +425,74 @@ def generate_track_mov_reps(input_path, output_dir, is_random=False):
 
 
 
-def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, target_H):
+def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, target_H,modified=False):
+
+    if modified:
+        tracks_path = videoPath.split("/")[:-1]
+        tracks_path = "/".join(tracks_path)
+        tracks_path = f"{tracks_path}/tracks_cuts_grid"
+        diff_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
+        pred_visibility    = torch.load(f"{tracks_path}/pred_visibility.pt")
+
+
+
+        inner_means = []  # per step t
+        outer_means = []
+
+        grid_size = 27
+        patch_h = 384 // grid_size
+        patch_w = 384 // grid_size
+        y_centers = np.arange(patch_h//2, 384, patch_h)
+        x_centers = np.arange(patch_w//2, 384, patch_w)
+        grid_y, grid_x = np.meshgrid(y_centers, x_centers, indexing="ij")
+        patch_centers = np.stack([grid_x.ravel(), grid_y.ravel()], axis=-1)  # shape [729, 2]
+        
+
+        for t in range(diff_tracks.shape[0]):
+            x1_t, y1_t, x2_t, y2_t = bboxes[t]
+            if t+1 >= bboxes.shape[0]:
+                x1_n, y1_n, x2_n, y2_n = bboxes[t]
+            else:
+                x1_n, y1_n, x2_n, y2_n = bboxes[t + 1]
+
+            bbox_t_valid = (x1_t != -1) and (y1_t != -1) and (x2_t != -1) and (y2_t != -1)
+            bbox_n_valid = (x1_n != -1) and (y1_n != -1) and (x2_n != -1) and (y2_n != -1)
+
+            diff_t = diff_tracks[t]        # [N,2]
+
+            inner_mask = (
+                (patch_centers[:, 0] >= x1_t) & (patch_centers[:, 0] <= x2_t) &
+                (patch_centers[:, 1] >= y1_t) & (patch_centers[:, 1] <= y2_t)
+            )
+            outer_mask = ~inner_mask
+
+            if bbox_t_valid and bbox_n_valid:
+                # Fallback: use bounding box center shift when no visible points in bbox
+                center_t = torch.tensor([(x1_t + x2_t) / 2, (y1_t + y2_t) / 2], 
+                                       dtype=torch.float32)
+                center_n = torch.tensor([(x1_n + x2_n) / 2, (y1_n + y2_n) / 2], 
+                                       dtype=torch.float32)
+                inner_mean = center_n - center_t
+        
+            elif inner_mask.any():
+                inner_mean = diff_t[inner_mask].mean(dim=0)
+
+            else:
+                inner_mean = torch.zeros(2, dtype=torch.float32)
+            if outer_mask.any():
+                outer_mean = diff_t[outer_mask].mean(dim=0)
+            else:
+                outer_mean = torch.zeros(2, dtype=torch.float32)
+
+            
+            
+            inner_means.append(inner_mean)
+            outer_means.append(outer_mean)
+    
+        return inner_means, outer_means, diff_tracks, pred_visibility
+
+
+            
     
     tracks_path = videoPath.split("/")[:-1]
     tracks_path = "/".join(tracks_path)
@@ -444,8 +515,6 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
                                 dtype=pred_tracks.dtype)
 
     pred_tracks = pred_tracks * scale_factors
-
-
 
 
     pred_tracks = pred_tracks[:,indices,:,:].to(dtype=torch.bfloat16)         # [1, 30, N, 2]
@@ -479,15 +548,18 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
         outer_mask = ~inner_mask                # rest
 
         # means (fallback to zero vector if empty)
-        if inner_mask.any():
-            inner_mean = diff_t[inner_mask].mean(dim=0)
-        elif bbox_t_valid and bbox_n_valid:
+
+        if bbox_t_valid and bbox_n_valid:
             # Fallback: use bounding box center shift when no visible points in bbox
             center_t = torch.tensor([(x1_t + x2_t) / 2, (y1_t + y2_t) / 2], 
                                    dtype=torch.float32)
             center_n = torch.tensor([(x1_n + x2_n) / 2, (y1_n + y2_n) / 2], 
                                    dtype=torch.float32)
             inner_mean = center_n - center_t
+        
+        elif inner_mask.any():
+            inner_mean = diff_t[inner_mask].mean(dim=0)
+        
         else:
             inner_mean = torch.zeros(2, dtype=torch.float32)
         if outer_mask.any():
@@ -850,3 +922,127 @@ def get_last_checkpoint_dir(directory):
         print("No suitable file found")
 
         return False  # No file found that matches the pattern
+
+
+
+
+def compute_iou(boxA, boxB):
+    # box = (ymin, xmin, ymax, xmax)
+    yA = max(boxA[0], boxB[0])
+    xA = max(boxA[1], boxB[1])
+    yB = min(boxA[2], boxB[2])
+    xB = min(boxA[3], boxB[3])
+
+    inter_area = max(0, yB - yA) * max(0, xB - xA)
+    if inter_area == 0:
+        return 0.0
+
+    boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+
+    iou = inter_area / float(boxA_area + boxB_area - inter_area)
+    return iou
+
+
+
+
+def parse_pred_string(pred_str):
+    obj_list, cam_list = [], []
+    # Split into samples
+    samples = pred_str.strip().split(";")
+    
+    for sample in samples:
+        if not sample:
+            continue
+        # Find all signed numbers like <-001>, <+003>
+        numbers = re.findall(r"<([+-]\d+)>", sample)
+        if len(numbers) != 4:
+            raise ValueError(f"Unexpected format in sample: {sample}")
+        
+        obj_x, obj_y, cam_x, cam_y = map(int, numbers)
+        obj_list.append([obj_x, obj_y])
+        cam_list.append([cam_x, cam_y])
+    
+    return torch.tensor(obj_list, dtype=torch.float32), torch.tensor(cam_list, dtype=torch.float32)
+
+def compute_l1(object_vecs, camera_vecs, pred_str):
+    # Move ground truth to CPU float
+    object_cpu = torch.stack([v.float().cpu() for v in object_vecs])
+    camera_cpu = torch.stack([v.float().cpu() for v in camera_vecs])
+    
+    # Parse predictions
+    obj_pred, cam_pred = parse_pred_string(pred_str)
+    
+    # Ensure lengths match
+    assert object_cpu.shape == obj_pred.shape, "Object shape mismatch"
+    assert camera_cpu.shape == cam_pred.shape, "Camera shape mismatch"
+    
+    # L1 distances
+    l1_obj = torch.abs(object_cpu - obj_pred).sum()
+    l1_cam = torch.abs(camera_cpu - cam_pred).sum()
+    
+    return l1_obj.item(), l1_cam.item()
+
+
+def draw_arrow(img, start, dx, dy, color):
+    arrow_len = 40
+    
+    # Keep dx, dy as floats for precise normalization
+    norm = np.sqrt(dx*dx + dy*dy)
+    
+    # Handle zero vector case
+    if norm < 1e-6:
+        # Draw a small horizontal arrow if direction is undefined
+        end = (start[0] + arrow_len, start[1])
+    else:
+        # Normalize and scale to desired length
+        dx_norm = arrow_len * dx / norm
+        dy_norm = arrow_len * dy / norm
+        
+        # Convert to integers only for final endpoint calculation
+        end = (int(start[0] + dx_norm), int(start[1] + dy_norm))
+    
+    cv2.arrowedLine(img, start, end, color, 2, tipLength=0.3)
+
+
+
+"""
+for t in range(diff_tracks.shape[0]):
+            x1_t, y1_t, x2_t, y2_t = bboxes[t]
+            im_inner = inner_means[t].float().cpu().numpy().astype(np.float32)  # (2,)
+            im_outer = outer_means[t].float().cpu().numpy().astype(np.float32)  # (2,)
+
+            flow = np.empty((target_H, target_W, 2), dtype=np.float32)
+            flow[:, :, 0] = im_outer[0]
+            flow[:, :, 1] = im_outer[1]
+            # overwrite bbox region with inner mean
+            if (x2_t > x1_t) and (y2_t > y1_t):
+                flow[y1_t:y2_t, x1_t:x2_t, 0] = im_inner[0]
+                flow[y1_t:y2_t, x1_t:x2_t, 1] = im_inner[1]
+
+            flow_img = flow_to_image(flow)
+            frame = video[0, t].permute(1, 2, 0).cpu().float().numpy()  # [H,W,C]
+            frame = (frame - frame.min()) / (frame.max() - frame.min())
+            frame = np.float32(frame)
+            frame =  np.uint8(255 * frame)
+
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+            # Ensure both are same color ordering
+            if flow_img.shape[2] == 3 and frame.shape[2] == 3:
+                # Convert frame to BGR for OpenCV consistency
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                # Flow is usually in RGB — convert to BGR if needed
+                flow_bgr = cv2.cvtColor(flow_img, cv2.COLOR_RGB2BGR)
+
+                print(flow_bgr.shape)
+                print(frame_bgr.shape)
+
+
+                # Blend
+                blended = cv2.addWeighted(frame_bgr, 1 - 0.6, flow_bgr, 0.6, 0)
+
+                cv2.imwrite(f"to_del/img{t}.png", blended)
+        exit(1)
+
+"""

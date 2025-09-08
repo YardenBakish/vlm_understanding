@@ -251,6 +251,96 @@ def generate_track(video_path, output_dir, is_random=False):
 
 
 
+def generate_track_cuts(video_path, output_dir, is_random=False):
+    grid_size = 27
+    grid_query_frame = 0
+    #video_path = "conditioned_models/cotracker/assets/movie1.mp4"
+    #print(is_random)
+    #print(video_path)
+
+    # load the input video frame by frame
+    video = read_video_from_path(video_path)
+    video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
+
+    B, T, C, H, W = video.shape
+    video_reshaped = video.view(B * T, C, H, W)
+
+    # Resize
+    video_resized = F.interpolate(video_reshaped, size=(384, 384), mode='bilinear', align_corners=False)
+
+    # Reshape back to original [B, T, C, H, W] format
+    video = video_resized.view(B, T, C, 384, 384)
+
+
+  
+    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
+
+    model = model.to(DEFAULT_DEVICE)
+    video = video.to(DEFAULT_DEVICE)
+
+    indices = np.linspace(0, video.shape[1]-1, 30, dtype=int)
+
+    all_diffs = []
+    all_vis = []
+
+
+   
+    if is_random:
+        points = generate_points(T, 512, 512,  n_points=576).cuda()
+        if torch.cuda.is_available():
+            queries = points.cuda()
+        pred_tracks, pred_visibility = model(
+        video,
+        queries = queries[None],
+        backward_tracking=True,
+    )
+    else:
+
+        for i in range(len(indices)-1):
+            start = indices[i].item()
+            end = indices[i+1].item()
+            pred_tracks, pred_visibility = model(
+                video[:,start:end+1],
+                grid_size=grid_size,
+                grid_query_frame=grid_query_frame,
+            )
+            pred_visibility = pred_visibility[:,-1].squeeze(0)
+           
+            diff = pred_tracks[:, -1] - pred_tracks[:, 0]   # shape [1, 729, 2]
+            diff = diff.squeeze(0)
+            all_diffs.append(diff)
+            all_vis.append(pred_visibility)
+
+        
+    pred_tracks_diff = torch.stack(all_diffs, dim=0) 
+    pred_visibility = torch.stack(all_vis, dim=0) 
+
+    
+    #print(pred_tracks_diff.shape)
+    #print("-----------------------")
+    torch.save(pred_tracks_diff,     f"{output_dir}/pred_tracks.pt")
+    torch.save(pred_visibility,     f"{output_dir}/pred_visibility.pt")
+
+    #exit(1)
+    #exit(1)
+    
+    #torch.save(pred_visibility, f"{output_dir}/pred_visibility.pt")
+    #exit(1)
+
+    '''
+    # save a video with predicted tracks
+    seq_name = video_path.split("/")[-1]
+    vis = Visualizer(save_dir="./saved_videos", pad_value=50, linewidth=1)
+    vis.visualize(
+        video,
+        pred_tracks,
+        pred_visibility,
+        query_frame=0 if is_random else grid_query_frame,
+    )
+    '''
+
+
+
 
 def generate_mov_from_track(video_path, tracks_path, BB_path, output_dir):
 
@@ -389,8 +479,7 @@ def generate_mov_from_track(video_path, tracks_path, BB_path, output_dir):
             out_f.write("frame,inside_u,inside_v,outside_u,outside_v\n")
 
 '''
-num = "001148"
-video_path = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/video_original.mp4"
+
 tracks_path = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/tracks_grid"
 BB_path     = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/groundtruth.txt"
 output_dir  = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/tracks_mov_grid"
@@ -402,3 +491,15 @@ generate_mov_from_track(video_path, tracks_path, BB_path, output_dir)
 #video_path = "./assets/movie1.mp4"
 #output_dir = "saved_videos"
 #generate_track(video_path, output_dir, is_random=True)
+
+
+#num = "001148"
+#video_path = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/video_original.mp4"
+#tracks_path = f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_{num}/tracks_cuts_grid"
+#import os
+#os.makedirs(tracks_path,exist_ok=True)
+#video_path = f"dataset/GOT10KVAL_teacher/GOT-10k_Val_000030/video_original.mp4"
+#tracks_path = f"dataset/GOT10KVAL_teacher/GOT-10k_Val_000030/tracks_cuts_grid/tracks_cuts_grid"
+#import os
+#os.makedirs(tracks_path,exist_ok=True)
+#generate_track_cuts(video_path, tracks_path, is_random=False)

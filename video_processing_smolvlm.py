@@ -85,6 +85,11 @@ def smolvlm_sample_indices_fn(metadata, max_frames, target_fps, skip_secs=0, sel
         if total_points < num_points:
             num_points = total_points
         indices = np.linspace(start_idx, end_idx, num_points, dtype=int)
+        if len(indices) < num_frames:
+            curr_len_indices = len(indices)
+            for _ in range(num_frames-curr_len_indices):
+                indices = np.append(indices,indices[-1])
+
         return indices
 
 

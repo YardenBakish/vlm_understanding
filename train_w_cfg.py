@@ -20,7 +20,9 @@ from functools import partial
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from processing_smolvlm import SmolVLMProcessor
 import numpy as np
-import random
+from model_w_cfg import SmolVLMForConditionalGeneration
+from model_joint_learning import SmolVLMForConditionalGeneration as model_jl
+from modules.utils.callback import LossLoggerCallback2, CustomTrainer
 
 import config
 import argparse
@@ -29,12 +31,17 @@ def parse_args():
 
     parser.add_argument('--mode', type=str,
                                 choices=[
-                                    'uniform_blur', 'cfg', 'BB', 'BB_extended', 'optFlow_extended', 'optFlow_extended_coarse',
-                                    'BB_extended_freeze', 'optFlow_extended_freeze',
-                                
-                                'BB_test', 'BB_w_blur', 'BB_w_blur2', 'BB_w_blur_extended', 'optical_flow','optical_flow_w_cfg'],
-                                default = 'BB_extended',
+                                    'cfg_cap_simple_extended_freeze',
+                                    'cfg_cap_simple_extended', 
+                                    'cfg_BB_simple_extended_freeze',
+                                    'cfg_BB_simple_extended',
+                                    'joint_learning_extended',
+                                    'joint_learning_extended_mask',
+
+                                    ],
+                                default = 'cfg_cap_simple_extended',
                                 help='')
+    parser.add_argument('--resume', action='store_true', help='use small model')
 
     parser.add_argument('--model-size', type=str,
                                 choices=['500M', '2.2B', '2.2B_quant'],
@@ -44,12 +51,12 @@ def parse_args():
     args = parser.parse_args()
     config.get_config(args)
 
-    args.save_dir = f'{args.paths["distilled_models"]}/{args.mode}/{args.model_size}'
+    args.save_dir = f'{args.paths["finetuned_models"]}/{args.mode}/{args.model_size}'
 
     if True:
         args.model_id = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     else:
-        args.model_id = "distilled_models/uniform_blur/2.2B/checkpoint-2445"
+        args.model_id = "finetuned_models/uniform_blur/2.2B/checkpoint-2445"
 
     os.makedirs(args.save_dir, exist_ok=True)
     return args
@@ -62,6 +69,8 @@ class LossLoggerCallback(TrainerCallback):
         self.log_file = log_file
 
     def on_log(self, args, state, control, model=None,  logs=None, **kwargs):
+        #for name, param in model.named_parameters():
+        #    print(name, param.grad is not None, None if param.grad is None else param.grad.norm().item())
         if logs is not None and "loss" in logs:
             with open(self.log_file, "a") as f:
                 f.write(f"Step {state.global_step}: loss = {logs['loss']:.4f}\n")
@@ -245,10 +254,17 @@ def collate_fn_blur(examples,image_token_id,model,processor, withBlur, extended,
 
 
 
-def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extended, num_frames, coarse):
+def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extended, num_frames, coarse, is_joint_learning):
     videoPath = "origin_video_path" if withBlur==False else "blur_full_video_path"
     instances = []
+    B_diffs   = []
+    B_vis   = []
+
+
     for example in examples:
+
+        #print(f"\t PATH {example[videoPath]}")
+        #example[videoPath] = "dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_000966/video_original.mp4"
         
         dummy_input = [{"type": "text", "text": "Caption the video."}]
         dummy_input.append({"type": "video", "path": example[videoPath]})
@@ -261,44 +277,65 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
                                                  tokenize=True, return_dict=True, return_tensors="pt", return_frame_indices=True)
         
         
+        #print(f"\t indices.shape {indices.shape}")
+        
+        
         target_H = dummy_instance["pixel_values"].shape[-2]
         target_W = dummy_instance["pixel_values"].shape[-1]
+        target_T = dummy_instance["pixel_values"].shape[1]
         
+        #print(dummy_instance["pixel_values"].shape)
         prompt = ast.literal_eval(example["bbox"]) 
 
 
         prompt = np.array(prompt)
-        indices[-1] = min(indices[-1], len(prompt)-1) 
+        indices[-1] = min(indices[-1], len(prompt)-1)
+        if indices.shape[0] < target_T:
+            indices = np.append(indices, indices[-1])
+      
+            
         prompt = prompt[indices]
         bboxes = []
         valid = True
         for i in range(prompt.shape[0]):
             numbers = re.findall(r'<loc(\d+)>', prompt[i])
             if len(numbers)!=4:
-                valid = False
-                break
-            y_min, x_min, y_max, x_max = map(int, numbers)
-            x_min *= (target_W / 1024)
-            y_min *= (target_H / 1024)
-            x_max *= (target_W / 1024)
-            y_max *= (target_H / 1024)
+                bboxes.append([-1, -1, -1, -1])
+            else:
+                y_min, x_min, y_max, x_max = map(int, numbers)
+                x_min *= (target_W / 1024)
+                y_min *= (target_H / 1024)
+                x_max *= (target_W / 1024)
+                y_max *= (target_H / 1024)
+    
+                x_min =  int(x_min)
+                y_min =  int(y_min)
+                x_max =  int(x_max)
+                y_max =  int(y_max)
+                bboxes.append([x_min, y_min, x_max, y_max])
 
-            x_min =  int(x_min)
-            y_min =  int(y_min)
-            x_max =  int(x_max)
-            y_max =  int(y_max)
-            bboxes.append([x_min, y_min, x_max, y_max])
+        #if valid == False:
+        #    continue
 
-        if valid == False:
-            continue
+        #print(f"\t bboxes len {len(bboxes)}")
+
         bboxes = np.array(bboxes).astype(np.int32)
-        inner_means, outer_means, diff_tracks, pred_visibility =  collect_difference_vectors(dummy_instance["pixel_values"], example[videoPath], bboxes, indices,target_W,target_H, modified=True)
+        inner_means, outer_means, diffs, pred_visibility = collect_difference_vectors(dummy_instance["pixel_values"], example[videoPath], bboxes, indices,target_W,target_H, modified=True)
+    
+        #print(f"\t len(inner_means) {len(inner_means)}")
+        #print(f"\t len(diffs) {diffs.shape}")
 
-        
-        if random.choice([True, False]):
+
+        B_diffs.append(diffs)
+        B_vis.append(pred_visibility)
+
+        if is_joint_learning:
+            prompt = example["generated_prompt"]
+            user_text_learning = "Caption the video."
+            
+        else:
             user_text_learning = "Return the 2D movement vectors (dx, dy) for the object and for the camera, for every frame in the video."
             prompt = ""
-            #print(outer_means)
             for vec_idx in range(len(inner_means)):
                 for time in range(2):
                     lst = inner_means if time ==0 else outer_means
@@ -315,29 +352,20 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
                         val_x = min(abs(val_x),512)
                         val_y = min(abs(val_y),512)
                         prompt+=f"<{pre}dx{sign_char_x}{val_x:03d}><{pre}dy{sign_char_y}{val_y:03d}>"
-
-                        #prompt+=f"{pre}<{sign_char_x}{val_x:03d}><{sign_char_y}{val_y:03d}>"
                     else:
                         val_x = min(abs(val_x),1)
                         val_y = min(abs(val_y),1)
-                        #prompt+=f"{pre}<{sign_char_x}{val_x:01d}><{sign_char_y}{val_y:01d}>"
                         prompt+=f"<{pre}dx{sign_char_x}{val_x:01d}><{pre}dy{sign_char_y}{val_y:01d}>"
+
 
                 if vec_idx < len(inner_means)-1:
                     prompt+=";"
-        else:
-            user_text_learning = "Caption the video."
-            prompt = example["generated_prompt"]
 
-
-
-        #print(user_text_learning)
-        #print(prompt)
-
+      
+        
         #user_content = [{"type": "text", "text": "Return xyxy coordinates for the object in the video"}]
+        
         user_content = [{"type": "text", "text": user_text_learning}]
-
-        #object<loc0012><loc0034>background<loc0987><loc0756>;
 
 
         user_content.append({"type": "video", "path": example[videoPath]})
@@ -350,8 +378,18 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
         instance = processor.apply_chat_template(messages, add_generation_prompt=False, extended = extended, num_frames = num_frames,
                                                  tokenize=True, return_dict=True, return_tensors="pt").to("cuda").to(model.dtype)
         
+        if instance["pixel_values"].shape[1] < num_frames:
+            
+            last_frame = instance["pixel_values"][:, -1:, ...]         # shape: [1, 1, 3, 384, 384]
+            instance["pixel_values"] = torch.cat([instance["pixel_values"], last_frame], dim=1)  # shape: [1, N, 3, 384, 384]
         instances.append(instance)
+        
 
+
+    movement_vectors = torch.cat(B_diffs, dim=0)
+    pred_visibility = torch.cat(B_vis, dim=0)
+
+    
 
     input_ids = pad_sequence(
         [inst["input_ids"].squeeze(0) for inst in instances],
@@ -374,10 +412,12 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
     out = {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
-        "labels": labels
+        "labels": labels,
+        "movement_vectors": movement_vectors,
+        'pred_visibility': pred_visibility
+
     }
-
-
+   
     # Step 1: figure out maximum frames, height, width across the batch
     pvs = [inst["pixel_values"].squeeze(0) for inst in instances if "pixel_values" in inst]
     if pvs:  # there is at least one non-None pixel_values
@@ -439,7 +479,7 @@ def basic_distillation(args):
                 bnb_4bit_compute_dtype=torch.bfloat16
             )
 
-        model = AutoModelForImageTextToText.from_pretrained(
+        model = SmolVLMForConditionalGeneration.from_pretrained(
             model_id,
             quantization_config=bnb_config if USE_QLORA else None,
             device_map="auto"
@@ -450,38 +490,84 @@ def basic_distillation(args):
         model = get_peft_model(model, lora_config)
         print(model.get_nb_trainable_parameters())
     else:
-        processor = AutoProcessor.from_pretrained(processor_id) if (("BB" not in args.mode) and ("optFlow" not in args.mode)) else SmolVLMProcessor.from_pretrained(processor_id)
-        model = AutoModelForImageTextToText.from_pretrained(
+        processor =  SmolVLMProcessor.from_pretrained(processor_id)
+
+        if "joint_learning" in args.mode:
+            model = model_jl.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
+            use_mask = "mask" in args.mode
+       
             #_attn_implementation="flash_attention_2",
         ).to("cuda")
+        else:
+            model = SmolVLMForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                #_attn_implementation="flash_attention_2",
+            ).to("cuda")
 
 
         for name, param in model.model.vision_model.named_parameters():
+            
+           
             if 'freeze' in args.mode:
-                param.requires_grad = False
-            else:
-                if 'encoder.layers' not in name:
+                if 'movement_encoder' not in name and 'MCA_layers' not in name:
                     param.requires_grad = False
-    
+            else:
+                if "joint_learning" in args.mode:
+                    if 'encoder.layers' not in name and 'movement_encoder' not in name and 'MCA_layers' not in name:
+                        param.requires_grad = False
+                else:
+                    if 'vision_model.encoder.layers' not in name and 'movement_encoder' not in name and 'MCA_layers' not in name:
+                        param.requires_grad = False
+
+            if args.resume == False and name == "encoder.MCA_layers.3.transformer.out_proj.weight":
+                param.data.zero_()
+            
+            #if "joint_learning" in args.mode and param.requires_grad == True:
+            #    param.register_hook(lambda g, n=name: print(n, g.norm().item()))
+
+        #if "joint_learning" in args.mode:
+        #    for name, param in model.model.text_model.named_parameters():
+        #        if 'head' not in name:
+        #            param.requires_grad = False
+        #    numbers = range(23)
+            #for name, param in model.model.vision_model.named_parameters():
+            #    for num in numbers:
+            #        if f'encoder.layers.{num}' in name:
+            #            param.requires_grad = False
+
         #for param in model.model.vision_model.parameters():
         #    param.requires_grad = False
+      
+    print("\n\n")
+    for name, param in model.named_parameters():
+        if param.requires_grad == True:
+            print(name)
+    
+    
 
     dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
+    #if "joint_learning" in args.mode:
+    #    dataset = dataset.shuffle(seed=42).select(range(200))
+
+
     #print(dataset)
     #print(f"prompt:  {dataset[0]['generated_prompt']}, video: {dataset['origin_video_path']}")
     image_token_id = processor.tokenizer.additional_special_tokens_ids[
     processor.tokenizer.additional_special_tokens.index("<image>")
     ]
 
-    num_train_epochs=20
-    if "2" in args.mode:
-        num_train_epochs = 10
+    num_train_epochs=10
+   
+    b_size = 8 if "joint_learning" in args.mode else 16
+
+    
     
     training_args = TrainingArguments(
         num_train_epochs=num_train_epochs,                  #5
-        per_device_train_batch_size=16, #16
+        per_device_train_batch_size=b_size, #16
         gradient_accumulation_steps=1,
         warmup_steps=50,
         learning_rate=1e-4,
@@ -494,6 +580,7 @@ def basic_distillation(args):
         bf16=True,
         #resume_from_checkpoint=True,
         report_to="tensorboard",
+        dataloader_drop_last = True,
 
         output_dir=f"./{args.save_dir}",
         hub_model_id=f"./{args.save_dir}",
@@ -504,45 +591,48 @@ def basic_distillation(args):
         dataloader_pin_memory=False
     )
     #resume_from_checkpoint=True
-    if (("BB" in args.mode) or ("optFlow" in args.mode)):
-        withBlur = False
-        withExtended = None
-        num_frames  = None
-        if "BB_w_blur" in args.mode:
-            withBlur = True
-        if "extended" in args.mode:
-            withExtended = True
-            num_frames = 30 if "500M" in args.model_size else 30
+    withExtended = True
+    num_frames = 30 if "500M" in args.model_size else 30
         
      
 
-        if "BB" in args.mode:
-            data_collator_fn = partial(collate_fn_blur, image_token_id=image_token_id, model=model, processor=processor, withBlur = withBlur, extended=withExtended, num_frames=num_frames)  
-        else:
-            data_collator_fn = partial(collate_fn_optFlow, image_token_id=image_token_id, model=model, processor=processor, withBlur = withBlur, extended=withExtended, num_frames=num_frames, coarse= "coarse" in args.mode)  
-
+    if "BB" in args.mode:
+        data_collator_fn = partial(collate_fn_blur, image_token_id=image_token_id, model=model, processor=processor, withBlur = False, extended=withExtended, num_frames=num_frames)  
     else:
-         data_collator_fn = partial(collate_fn, image_token_id=image_token_id, model=model, processor=processor)
+        data_collator_fn = partial(collate_fn_optFlow, image_token_id=image_token_id, model=model, processor=processor, withBlur = False, extended=withExtended, num_frames=num_frames, 
+                                   coarse= "coarse" in args.mode, 
+                                   is_joint_learning = "joint_learning" in args.mode)  
 
-    trainer = Trainer(
-    model=model,
-    args=training_args,
-    data_collator= data_collator_fn,
-    train_dataset=dataset,
-    callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
-    )
+ 
+    if "joint_learning" not in args.mode:
+        trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
+        )
+    else:
+        trainer = CustomTrainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        callbacks=[LossLoggerCallback2(f"./{args.save_dir}/logs/log.txt")] 
+        )
 
     
-    trainer.train(resume_from_checkpoint=True) #resume_from_checkpoint=True
+    trainer.train(resume_from_checkpoint=args.resume) #resume_from_checkpoint=True
 
 
 
 if __name__ == "__main__":
     args          = parse_args()
     config.get_config(args)
-    if ("BB" in args.mode) or ("optFlow" in args.mode):
-        args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined_w_BB.csv'
-    else:
-        args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined.csv' #f"dataset/got10k/teacher/train/{args.mode}/combined.csv" 
+    args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined_w_BB.csv'
+    #if ("BB" in args.mode) or ("optFlow" in args.mode):
+    #    args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined_w_BB.csv'
+    #else:
+    #    args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined.csv' #f"dataset/got10k/teacher/train/{args.mode}/combined.csv" 
 
     basic_distillation(args)

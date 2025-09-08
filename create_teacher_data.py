@@ -36,6 +36,9 @@ def parse_args():
 
 
     parser.add_argument('--random', action='store_true', help='use small model')
+    
+    parser.add_argument('--cuts', action='store_true', help='use small model')
+
 
     parser.add_argument('--small', action='store_true', help='use small model')
     parser.add_argument('--mixed_precision', action='store_true', help='use mixed precision')
@@ -363,7 +366,7 @@ def create_tracks(args):
     pattern = re.compile(r'.*_(\d+)$')
 
     dataset_dir = args.paths['dataset_dir']     #      args.paths['dataset_dir']               
-    output_dir  = args.output_dir               #  # args.output_dir
+    output_dir  =  "dataset/GOT10KVAL_teacher"              #  # args.output_dir "dataset/GOT10KVAL_teacher" 
 
     with open(FILTERED_DATASET, 'r') as file:
         subdirs = file.readlines()
@@ -378,13 +381,27 @@ def create_tracks(args):
     
     paritioned_subdirs  = sorted_subdirs
     
+
+    pref_dir = "tracks_cuts" if args.cuts  else "tracks"
     
     
     output_dir_ext = "random" if args.random else "grid"
     for dir in paritioned_subdirs:
-        output_rep_dir = f"{output_dir}/{dir}/tracks_{output_dir_ext}"
+
+        if os.path.exists(f"{output_dir}/{dir}/video_original.mp4") == False:
+            continue
+
+        output_rep_dir = f"{output_dir}/{dir}/{pref_dir}_{output_dir_ext}"
+
+        if args.cuts:
+             if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
+                continue
+
+
+        
 
         video_path = f"{output_dir}/{dir}/video_original.mp4"
+
         if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
             continue
         if os.path.exists(f"{output_rep_dir}/pred_tracks_online.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility_online.pt"):
@@ -394,7 +411,8 @@ def create_tracks(args):
 
         os.makedirs(output_rep_dir, exist_ok=True)
        
-        generate_track_reps(video_path, output_rep_dir, is_random=False)
+        generate_track_reps(video_path, output_rep_dir,cuts = args.cuts, is_random=False)
+        
        
         
         #generate_movement_reps(args, sample_dir, output_rep_dir,step)
