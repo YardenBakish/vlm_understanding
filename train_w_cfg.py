@@ -22,7 +22,7 @@ from processing_smolvlm import SmolVLMProcessor
 import numpy as np
 from model_w_cfg import SmolVLMForConditionalGeneration
 from model_joint_learning import SmolVLMForConditionalGeneration as model_jl
-from modules.utils.callback import LossLoggerCallback2, CustomTrainer
+from modules.utils.callback import LossLoggerCallback2, CustomTrainer, compute_custom_metrics
 
 import config
 import argparse
@@ -37,6 +37,8 @@ def parse_args():
                                     'cfg_BB_simple_extended',
                                     'joint_learning_extended',
                                     'joint_learning_extended_mask',
+                                    'joint_learning_extended_mask_emph',
+
 
                                     ],
                                 default = 'cfg_cap_simple_extended',
@@ -259,6 +261,8 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
     instances = []
     B_diffs   = []
     B_vis   = []
+    B_inner_mask   = []
+
 
 
     for example in examples:
@@ -320,7 +324,7 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
         #print(f"\t bboxes len {len(bboxes)}")
 
         bboxes = np.array(bboxes).astype(np.int32)
-        inner_means, outer_means, diffs, pred_visibility = collect_difference_vectors(dummy_instance["pixel_values"], example[videoPath], bboxes, indices,target_W,target_H, modified=True)
+        inner_means, outer_means, diffs, pred_visibility, inner_mask = collect_difference_vectors(dummy_instance["pixel_values"], example[videoPath], bboxes, indices,target_W,target_H, modified=True)
     
         #print(f"\t len(inner_means) {len(inner_means)}")
         #print(f"\t len(diffs) {diffs.shape}")
@@ -328,6 +332,8 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
 
         B_diffs.append(diffs)
         B_vis.append(pred_visibility)
+        B_inner_mask.append(inner_mask)
+
 
         if is_joint_learning:
             prompt = example["generated_prompt"]
@@ -388,6 +394,8 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
 
     movement_vectors = torch.cat(B_diffs, dim=0)
     pred_visibility = torch.cat(B_vis, dim=0)
+    inner_mask = torch.cat(B_inner_mask, dim=0)
+    
 
     
 
@@ -414,7 +422,8 @@ def collate_fn_optFlow(examples,image_token_id,model,processor, withBlur, extend
         "attention_mask": attention_mask,
         "labels": labels,
         "movement_vectors": movement_vectors,
-        'pred_visibility': pred_visibility
+        'pred_visibility': pred_visibility,
+        "inner_mask": inner_mask
 
     }
    
@@ -496,7 +505,8 @@ def basic_distillation(args):
             model = model_jl.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
-            use_mask = "mask" in args.mode
+            use_mask = "mask" in args.mode,
+            use_emph = ("mask" in args.mode) and ("emph" in args.mode)
        
             #_attn_implementation="flash_attention_2",
         ).to("cuda")
@@ -587,8 +597,15 @@ def basic_distillation(args):
         logging_dir=f"./{args.save_dir}/logs", 
         remove_unused_columns=False,
         gradient_checkpointing=True,
-     
-        dataloader_pin_memory=False
+        dataloader_pin_memory=False,
+
+        
+        evaluation_strategy="steps",
+        eval_steps=301,
+        eval_on_start =True,
+
+
+
     )
     #resume_from_checkpoint=True
     withExtended = True
@@ -613,11 +630,15 @@ def basic_distillation(args):
         callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
         )
     else:
+        compute_metrics_fn = partial(compute_custom_metrics, tokenizer=processor)
+
         trainer = CustomTrainer(
         model=model,
         args=training_args,
         data_collator= data_collator_fn,
         train_dataset=dataset,
+        eval_dataset=dataset,
+        compute_metrics = compute_metrics_fn,
         callbacks=[LossLoggerCallback2(f"./{args.save_dir}/logs/log.txt")] 
         )
 

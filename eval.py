@@ -48,31 +48,37 @@ from processing_smolvlm import SmolVLMProcessor
 
 SAMPLES_TO_TEST = [
 
-#"GOT-10k_Val_000018",
-"GOT-10k_Val_000030",
-
-#"GOT-10k_Val_000022",
-#"GOT-10k_Val_000003",
+"GOT-10k_Val_000069",
 #"GOT-10k_Val_000006",
-#"GOT-10k_Val_000007",
 #"GOT-10k_Val_000015",
-#"GOT-10k_Val_000027",
 #"GOT-10k_Val_000029",
 #"GOT-10k_Val_000085",
 #"GOT-10k_Val_000107",
+#"GOT-10k_Val_000017",
+
+
+
+
+
+
+
+#"GOT-10k_Val_000030",
+
+#"GOT-10k_Val_000022",
+#"GOT-10k_Val_000003",
+#"GOT-10k_Val_000007",
+#"GOT-10k_Val_000027",
 #"GOT-10k_Val_000132",
 #"GOT-10k_Val_000014",
-#"GOT-10k_Val_000017",
-#"GOT-10k_Val_000022",
 
 ]
 
 SAMPLES_EMOTIONS_TO_TEST =[
-    "vid1",
-    "vid2",
-    "vid3",
+    #"vid1",
+    #"vid2",
+    #"vid3",
     "vid4",
-    "vid5",
+    #"vid5",
 ]
 
 
@@ -83,9 +89,12 @@ def parse_args():
     parser.add_argument('--mode', type=str,
                                 choices=[
                                         'distil_BB_extended', 'distil_optFlow_extended','distil_optFlow_extended_coarse',
+                                        'finetune_joint_learning_extended',
                                         'finetune_cfg_cap', 'finetune_cfg_BB',
                                         'finetune_cfg_optflow_cap', 'finetune_cfg_optflow_BB',
                                         'finetune_joint_learning_extended_mask',
+                                        'finetune_joint_learning_extended_mask_emph',
+
                                         'finetune_cfg_cap_simple_extended'
                                         ],
                                 default = 'distil_BB_extended',
@@ -130,8 +139,8 @@ def parse_args():
     else:
         args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     
-    args.finetuned_dir =  get_last_checkpoint_dir(finedtuned_dir) #  #args.orig_dir
-
+    args.finetuned_dir =  get_last_checkpoint_dir(finedtuned_dir,last=True) #  #args.orig_dir
+    #args.finetuned_dir = "finetuned_models/joint_learning_extended_mask/2.2B/checkpoint-2100"
     
     args.prompt_orig     = "Describe this video in detail" if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
     
@@ -427,6 +436,8 @@ def create_video_with_text(video_files, text_list, output_path):
     
     # Find the smallest height and use it for all clips to ensure consistency
     min_height = min(clip.h for clip in video_clips)
+
+    
     
     # Resize all clips to have the same height (keeping aspect ratio)
     resized_clips = []
@@ -478,8 +489,10 @@ def create_video_with_text(video_files, text_list, output_path):
     
     # Set the duration to the maximum of all video durations
     max_duration = max(clip.duration for clip in video_clips)
+   
     final_composition = final_composition.set_duration(max_duration)
-    
+
+   
     # Write the final video
     final_composition.write_videofile(
         output_path, 
@@ -612,7 +625,7 @@ def configure_options(args, model_type):
 
 
 def vis(args):
-    model_types           = [ "finetuned"  ,"orig" ,    ]
+    model_types           = ["finetuned"  , "orig" ,    ]
     processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     explainations_compare = []
     prompt                = ""
@@ -653,7 +666,8 @@ def vis(args):
                 model = model_jl.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
-                use_mask = "mask" in args.mode
+                use_mask = "mask" in args.mode,
+                use_emph = ("mask" in args.mode) and ("emph" in args.mode)
                 #_attn_implementation="flash_attention_2",
                 ).to("cuda")
 
@@ -699,11 +713,12 @@ def vis(args):
       
         for sample in arr_to_test:
 
-            videos        = ["video_original.mp4",  "video_blur_full.mp4",  ] #"video_blur_object.mp4",
+            videos        = ["video_blur_full.mp4","video_original.mp4",      ] # , 
             explainations = [None for i in range(len(videos))]
             paths         = [f"{pref_dir}/{sample}/{videos[i]}" for i in range(len(videos))]
+           
             #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_001148/{videos[i]}" for i in range(len(videos))]
-
+            paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_008365/{videos[i]}" for i in range(len(videos))]
 
             #normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
             output_dir = f'{args.eval_dir}/{sample}' 
@@ -713,8 +728,8 @@ def vis(args):
 
             for i in range(len(explainations)):
                 path = paths[i]
-
-               
+                
+                
 
                 messages = [
                     {
@@ -758,10 +773,10 @@ def vis(args):
                     
                     
                     
-
+                #model.eval()
                
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=1024)
+                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=128)
 
                 generated_texts = processor.batch_decode(
                     generated_ids,
@@ -771,7 +786,7 @@ def vis(args):
 
                
                 print(explaination,flush = True)
-                exit(1)
+                #exit(1)
                 
                 
                 #visualize(inputs,pred=parse_loc_string(explaination),indices=indices,vis_pred=True)
@@ -817,17 +832,21 @@ def vis(args):
     
 
     if "BB" not in args.mode:
-        for sample in SAMPLES_TO_TEST:
+        for sample in arr_to_test:
             for j in range(len(explainations)):
                 ext = "_blurry" if "blur" in videos[j] else ""
 
                 explain_baseline_original =  f"Standard: {explainations_compare_dict['orig'][sample][j]}" 
                 explain_finetuned_original = f"Finetuned: {explainations_compare_dict['finetuned'][sample][j]}" 
 
-                if True:
+                if False:
+                    exit(1)
                     gen_visualizations_sampled_frames(args,explainations_compare_dict,inputs_dict,compare_mode= "optFlow",indices_dict=indices_dict)
                 else:
                     explainations_models = [explain_baseline_original, explain_finetuned_original]
+                    
+                    #exit(1)
+                    
                     create_video_with_text([paths[j],paths[j]], explainations_models, f"{output_dir}/compare_models{ext}.mp4")
     
         #if "optFlow" in args.mode:

@@ -3,6 +3,9 @@ from typing import Optional, Union, Any
 from torch import nn
 from transformers import AutoProcessor, BitsAndBytesConfig, AutoModelForImageTextToText ,TrainingArguments, Trainer, TrainerCallback
 import torch
+from transformers import EvalPrediction
+
+
 
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -17,7 +20,7 @@ class CustomTrainer(Trainer):
         inputs: dict[str, Union[torch.Tensor, Any]],
         return_outputs: bool = False,
         num_items_in_batch: Optional[torch.Tensor] = None,
-    ):
+        ):
 
  
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
@@ -71,6 +74,72 @@ class CustomTrainer(Trainer):
             loss *= self.accelerator.num_processes
 
         return (loss, outputs) if return_outputs else loss
+    
+     def prediction_step(
+        self,
+        model: nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[list[str]] = None,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+         
+         
+         inputs = self._prepare_inputs(inputs)
+         
+         with torch.no_grad():
+            outputs = model(**inputs)
+         
+         
+         return (None, outputs["logits"], inputs["labels"])
+
+     
+     def get_eval_dataloader(self, eval_dataset):
+       
+        return torch.utils.data.DataLoader(
+            eval_dataset.select(range(16)),
+            batch_size=self.args.per_device_eval_batch_size,
+            collate_fn=self.data_collator,
+            shuffle=False
+        )
+     
+     
+     
+     def evaluate(self, eval_dataset=None, **kwargs):
+
+
+        outputs = super().evaluate(eval_dataset=eval_dataset, **kwargs)
+        print(self.state.global_step)
+
+        print(outputs)
+        return outputs
+        exit(1)
+        
+        
+        predictions = self.predictions
+        labels = self.label_id
+       
+
+        # Collect predictions + refs
+        predictions = self.predictions
+        labels = self.label_ids
+
+        decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        results = []
+        for pred, ref in zip(decoded_preds, decoded_labels):
+            results.append({"prediction": pred, "reference": ref})
+
+        # Example metric
+        accuracy = sum(p.strip() == r.strip() for p, r in zip(decoded_preds, decoded_labels)) / len(results)
+
+        # Save JSON
+        with open(f"{self.args.output_dir}/eval_results.json", "w") as f:
+            json.dump({"metrics": {"accuracy": accuracy}, "examples": results[:50]}, f, indent=2)
+
+        # Add accuracy to metrics dict
+        eval_output["accuracy"] = accuracy
+        return eval_output
 
 
 
@@ -95,3 +164,58 @@ class LossLoggerCallback2(TrainerCallback):
         if logs is not None and "cap_loss" in logs:
             with open(self.log_file, "a") as f:
                 f.write(f"Step {state.global_step}: cap_loss = {logs['cap_loss']:.4f}\n")
+
+
+
+
+def compute_custom_metrics(eval_pred: EvalPrediction, tokenizer):
+    preds, labels = eval_pred.predictions, eval_pred.label_ids
+
+   
+  
+
+    #preds[preds == -100] = tokenizer.tokenizer.pad_token_id
+    labels[labels == -100] = tokenizer.tokenizer.pad_token_id
+
+
+    preds = torch.tensor(preds)           # shape: (batch, seq_len, vocab_size)
+    preds = torch.argmax(preds, dim=-1)  # shape: (batch, seq_len)
+
+
+    generated_texts = tokenizer.batch_decode(
+                    labels,
+                    skip_special_tokens=True,
+                )
+    explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
+
+               
+    print(explainations,flush = True)
+    
+
+    generated_texts = tokenizer.batch_decode(
+                    preds,
+                    skip_special_tokens=True,
+                )
+    explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
+
+
+               
+    print(explainations,flush = True)
+    return {"custom_loss": 2.3}
+
+
+    exit(1)
+
+    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+    # Example custom loss
+    total_loss = 0.0
+
+    print(decoded_preds)
+    print(decoded_labels)
+    for pred, ref in zip(decoded_preds, decoded_labels):
+        total_loss += float(len(set(pred) ^ set(ref)))  # placeholder
+
+    avg_loss = total_loss / len(decoded_preds)
+    return {"custom_loss": avg_loss}

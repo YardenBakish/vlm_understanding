@@ -328,6 +328,9 @@ class SmolVLMEncoder(nn.Module):
         self.num_MCA_layers = 4
         self.use_cfg = True
         self.use_mask = config.use_mask
+        self.use_emph = config.use_emph
+
+
 
 
         layers_lst = []
@@ -512,6 +515,8 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         self.use_cfg = True
         self.use_optflow = config.use_optflow
         self.use_mask = config.use_mask
+        self.use_emph = config.use_emph
+
 
 
         #if config.use_cfg:
@@ -526,7 +531,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embeddings = value
 
-    def masked_optical_flow_loss(self,pred, target, pred_visibility,use_mask=False, magnitude_threshold=384):
+    def masked_optical_flow_loss(self,pred, target, pred_visibility, inner_mask, use_mask=False, use_emph=False, magnitude_threshold=384):
         """
         L1 loss between optical flow vectors, masked when magnitude > threshold
 
@@ -541,24 +546,42 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         # Calculate magnitudes for both pred and target
         pred_mag = torch.norm(pred, dim=-1)  # [116, 729]
         target_mag = torch.norm(target, dim=-1)  # [116, 729]
-
-        # Create mask - keep vectors where both magnitudes <= threshold
-        if use_mask:
-            mask =  pred_visibility
-        else:
-            mask = (pred_mag <= magnitude_threshold) & (target_mag <= magnitude_threshold)
         
-
-
-        # Apply mask and calculate L1 loss only on valid vectors
-        if mask.sum() > 0:
-            masked_pred = pred[mask]  # [N, 2] where N is number of valid vectors
-            masked_target = target[mask]  # [N, 2]
-            loss = F.l1_loss(masked_pred, masked_target, reduction='mean')
+        # Create base mask - keep vectors where both magnitudes <= threshold
+        if use_mask:
+            base_mask = pred_visibility 
+        else:
+            base_mask = (pred_mag <= magnitude_threshold) & (target_mag <= magnitude_threshold)
+        
+        # Apply base mask and calculate L1 loss
+        if base_mask.sum() > 0:
+            masked_pred = pred[base_mask]  # [N, 2] where N is number of valid vectors
+            masked_target = target[base_mask]  # [N, 2]
+            
+            if use_emph and inner_mask is not None:
+                # Create weights for emphasis: 2x for inner_mask, 1x for others
+                weights = torch.full_like(base_mask, 0.5, dtype=torch.float32, device=pred.device)
+                weights[inner_mask & base_mask] = 10.0  # 2x weight for inner mask region
+                
+                # Apply base mask to get valid weights
+                masked_weights = weights[base_mask]  # [N]
+                
+                # Calculate weighted L1 loss
+                elementwise_loss = torch.abs(masked_pred - masked_target)  # [N, 2]
+                elementwise_loss = elementwise_loss.mean(dim=-1)  # [N] - mean over x,y components
+                
+                # Apply weights and compute final loss
+                weighted_loss = elementwise_loss * masked_weights  # [N]
+                loss = weighted_loss.mean()  # Scalar loss
+            else:
+                # Standard L1 loss without emphasis
+                loss = F.l1_loss(masked_pred, masked_target, reduction='mean')
         else:
             # If no valid vectors, return zero loss
             loss = torch.tensor(0.0, device=pred.device, requires_grad=True)
 
+        
+      
         return loss
 
     def forward(
@@ -571,6 +594,8 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         return_dict: Optional[bool] = None,
         movement_vectors: Optional[torch.FloatTensor] = None,
         pred_visibility : Optional[torch.BoolTensor] = None,
+        inner_mask : Optional[torch.BoolTensor] = None,
+
 
         
     ) -> Union[Tuple, BaseModelOutput]:
@@ -705,7 +730,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
             exit(1)'''
             #print(flow.shape)
             
-            loss_rec = 0.1* self.masked_optical_flow_loss(flow, movement_vectors,pred_visibility,use_mask=self.use_mask)
+            loss_rec = 0.1* self.masked_optical_flow_loss(flow, movement_vectors,pred_visibility,inner_mask=inner_mask,use_mask=self.use_mask, use_emph = self.use_emph)
                        
             movement_vectors_loss = [loss_rec]
 
@@ -951,13 +976,15 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
     in forward. Instead, we override inputs_merger here with custom logic.
     """
 
-    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optflow : False, use_mask : False):
+    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optflow : False, use_mask : False, use_emph:False):
         super().__init__(config)
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
         config.vision_config.use_cfg     = True
         config.vision_config.use_optflow = True if use_optflow else False
         config.vision_config.use_mask    = True if use_mask else False
+        config.vision_config.use_emph    = True if use_emph else False
+
 
 
        
@@ -1046,7 +1073,9 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
 
         return merged_embeds
 
-    def get_image_features(self, pixel_values: torch.FloatTensor, pixel_attention_mask: torch.LongTensor = None,  movement_vectors:torch.LongTensor = None, pred_visibility : Optional[torch.BoolTensor] = None ):
+    def get_image_features(self, pixel_values: torch.FloatTensor, pixel_attention_mask: torch.LongTensor = None,  movement_vectors:torch.LongTensor = None,
+     pred_visibility : Optional[torch.BoolTensor] = None,
+     inner_mask : Optional[torch.BoolTensor] = None ):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model.
 
@@ -1091,7 +1120,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
         # Get sequence from the vision encoder
-        image_hidden_states, movement_vectors_loss = self.vision_model(pixel_values=pixel_values,pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask, movement_vectors= movement_vectors, pred_visibility = pred_visibility )
+        image_hidden_states, movement_vectors_loss = self.vision_model(pixel_values=pixel_values,pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask, movement_vectors= movement_vectors, pred_visibility = pred_visibility, inner_mask = inner_mask )
 
 
       
@@ -1123,6 +1152,8 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         movement_vectors : Optional[torch.LongTensor] = None,
         
         pred_visibility : Optional[torch.BoolTensor] = None,
+        inner_mask : Optional[torch.BoolTensor] = None,
+
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, SmolVLMBaseModelOutputWithPast]:
@@ -1165,7 +1196,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         if pixel_values is not None and image_hidden_states is not None:
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
         elif pixel_values is not None:
-            image_hidden_states, movement_vectors_loss = self.get_image_features(pixel_values, pixel_attention_mask, movement_vectors,pred_visibility )
+            image_hidden_states, movement_vectors_loss = self.get_image_features(pixel_values, pixel_attention_mask, movement_vectors,pred_visibility,inner_mask )
         elif image_hidden_states is not None:
             image_hidden_states = image_hidden_states.to(dtype=self.dtype, device=input_ids.device)
 
@@ -1222,9 +1253,9 @@ class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config, use_cfg=False, use_optflow = False,use_mask=False ):
+    def __init__(self, config, use_cfg=False, use_optflow = False,use_mask=False, use_emph = False ):
         super().__init__(config)
-        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optflow = use_optflow, use_mask= use_mask)
+        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optflow = use_optflow, use_mask= use_mask, use_emph = use_emph)
         self.image_token_id = self.config.image_token_id
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.vocab_size = config.text_config.vocab_size
@@ -1295,6 +1326,8 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         
         movement_vectors: Optional[torch.FloatTensor] = None,
         pred_visibility : Optional[torch.BoolTensor] = None,
+        inner_mask : Optional[torch.BoolTensor] = None,
+
 
         
 
@@ -1330,6 +1363,8 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             return_dict=True,
             movement_vectors = movement_vectors,
             pred_visibility = pred_visibility,
+            inner_mask = inner_mask,
+
             
 
             **kwargs,

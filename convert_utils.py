@@ -438,6 +438,7 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
 
         inner_means = []  # per step t
         outer_means = []
+        inner_masks = []
 
         grid_size = 27
         patch_h = 384 // grid_size
@@ -464,6 +465,13 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
                 (patch_centers[:, 0] >= x1_t) & (patch_centers[:, 0] <= x2_t) &
                 (patch_centers[:, 1] >= y1_t) & (patch_centers[:, 1] <= y2_t)
             )
+
+
+            inner_masks.append(torch.from_numpy(inner_mask))
+
+            
+            
+
             outer_mask = ~inner_mask
 
             if bbox_t_valid and bbox_n_valid:
@@ -488,8 +496,9 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
             
             inner_means.append(inner_mean)
             outer_means.append(outer_mean)
-    
-        return inner_means, outer_means, diff_tracks, pred_visibility
+        
+        inner_masks = torch.stack(inner_masks, dim=0)
+        return inner_means, outer_means, diff_tracks, pred_visibility, inner_masks
 
 
             
@@ -900,8 +909,9 @@ def collect_tracks(example, videoPath, indices, target_W, target_H,skip_parse=Fa
     
 
 
-def get_last_checkpoint_dir(directory):
-    largest_number = -1
+def get_last_checkpoint_dir(directory,last=True):
+    
+    largest_number = -1 if last else 9999999
     largest_file = None
 
     # List all files in the directory
@@ -912,9 +922,15 @@ def get_last_checkpoint_dir(directory):
             # Extract the number part from the filename and convert it to an integer
             number = int(match.group(1))
             # Update the largest file if the current number is larger
-            if number > largest_number:
-                largest_number = number
-                largest_file = filename
+            if last:
+                if number > largest_number:
+                    largest_number = number
+                    largest_file = filename
+            else:
+                if number < largest_number:
+                    largest_number = number
+                    largest_file = filename
+
 
     if largest_file:
         return os.path.join(directory, largest_file)
