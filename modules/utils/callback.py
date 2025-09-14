@@ -4,6 +4,7 @@ from torch import nn
 from transformers import AutoProcessor, BitsAndBytesConfig, AutoModelForImageTextToText ,TrainingArguments, Trainer, TrainerCallback
 import torch
 from transformers import EvalPrediction
+import random
 
 
 
@@ -94,9 +95,11 @@ class CustomTrainer(Trainer):
 
      
      def get_eval_dataloader(self, eval_dataset):
+
+        return super().get_eval_dataloader(eval_dataset.select(range(24)))
        
         return torch.utils.data.DataLoader(
-            eval_dataset.select(range(16)),
+            eval_dataset.select(range(24)),
             batch_size=self.args.per_device_eval_batch_size,
             collate_fn=self.data_collator,
             shuffle=False
@@ -168,11 +171,33 @@ class LossLoggerCallback2(TrainerCallback):
 
 
 
-def compute_custom_metrics(eval_pred: EvalPrediction, tokenizer):
+class StreamingAccuracy:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.correct = 0
+        self.total = 0
+
+    def update(self, value):
+        self.correct += value
+        self.total += 1
+
+    def compute(self):
+        return {"accuracy": self.correct / self.total if self.total > 0 else 0.0}
+
+
+
+streaming_acc = StreamingAccuracy()
+
+
+
+def compute_custom_metrics(eval_pred: EvalPrediction,compute_result: bool, tokenizer):
+
     preds, labels = eval_pred.predictions, eval_pred.label_ids
 
-   
-  
+    #print(len(preds))
+    #exit(1)
 
     #preds[preds == -100] = tokenizer.tokenizer.pad_token_id
     labels[labels == -100] = tokenizer.tokenizer.pad_token_id
@@ -188,9 +213,9 @@ def compute_custom_metrics(eval_pred: EvalPrediction, tokenizer):
                 )
     explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
 
-               
-    print(explainations,flush = True)
-    
+
+    #print(explainations,flush = True)
+
 
     generated_texts = tokenizer.batch_decode(
                     preds,
@@ -199,23 +224,18 @@ def compute_custom_metrics(eval_pred: EvalPrediction, tokenizer):
     explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
 
 
-               
-    print(explainations,flush = True)
-    return {"custom_loss": 2.3}
 
+    #print(explainations,flush = True)
 
-    exit(1)
+    value = random.choice([1, 2])
+    print(value)
+    streaming_acc.update(value)
 
-    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    if compute_result:
+        res = streaming_acc.compute()
+        streaming_acc.reset()
+        print(res)
 
-    # Example custom loss
-    total_loss = 0.0
-
-    print(decoded_preds)
-    print(decoded_labels)
-    for pred, ref in zip(decoded_preds, decoded_labels):
-        total_loss += float(len(set(pred) ^ set(ref)))  # placeholder
-
-    avg_loss = total_loss / len(decoded_preds)
-    return {"custom_loss": avg_loss}
+        return {"custom_loss": res}
+    else:
+        return {"custom_loss": None}

@@ -598,6 +598,8 @@ def basic_distillation(args):
         remove_unused_columns=False,
         gradient_checkpointing=True,
         dataloader_pin_memory=False,
+        batch_eval_metrics = True,
+        per_device_eval_batch_size=8,
 
         
         evaluation_strategy="steps",
@@ -630,7 +632,7 @@ def basic_distillation(args):
         callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
         )
     else:
-        compute_metrics_fn = partial(compute_custom_metrics, tokenizer=processor)
+        compute_metrics_fn = partial(compute_custom_metrics,compute_result=True, tokenizer=processor)
 
         trainer = CustomTrainer(
         model=model,
