@@ -345,9 +345,11 @@ class SmolVLMEncoder(nn.Module):
             ])
 
             if self.use_mask:
+                
             
                 last_layers = [8,13,18,24]
             else:
+                
                 last_layers = list(range(config.num_hidden_layers - self.num_MCA_layers -1, config.num_hidden_layers-1))
             
             #print(last_layers)
@@ -516,6 +518,14 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         self.use_optflow = config.use_optflow
         self.use_mask = config.use_mask
         self.use_emph = config.use_emph
+        self.freeze = config.is_freeze
+        self.foc = config.foc
+        self.l2 = config.l2
+
+        if self.l2:
+            self.use_cfg = False
+        if self.foc:
+            self.use_mask = False
 
 
 
@@ -560,8 +570,8 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
             
             if use_emph and inner_mask is not None:
                 # Create weights for emphasis: 2x for inner_mask, 1x for others
-                weights = torch.full_like(base_mask, 0.5, dtype=torch.float32, device=pred.device)
-                weights[inner_mask & base_mask] = 10.0  # 2x weight for inner mask region
+                weights = torch.full_like(base_mask, 0.0, dtype=torch.float32, device=pred.device)
+                weights[inner_mask & base_mask] = 1.0  # 2x weight for inner mask region
                 
                 # Apply base mask to get valid weights
                 masked_weights = weights[base_mask]  # [N]
@@ -595,6 +605,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         movement_vectors: Optional[torch.FloatTensor] = None,
         pred_visibility : Optional[torch.BoolTensor] = None,
         inner_mask : Optional[torch.BoolTensor] = None,
+        video_id : Optional[str] = None,
 
 
         
@@ -628,6 +639,9 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         elif not self._use_flash_attention_2:
             patch_attention_mask = _prepare_4d_attention_mask(patch_attention_mask, hidden_states.dtype)
 
+       
+
+
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             attention_mask=patch_attention_mask,
@@ -646,46 +660,87 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         loss_rec = None
         movement_vectors_loss = []
 
+        
+        #import numpy as np
+        #for i in range(last_hidden_state.shape[0]):
+        #    l2 = torch.sum(last_hidden_state[i], dim=-1)  # [729]
+        #    # Reshape to 27x27
+        #    heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
+        #    # Upsample to 128x128
+        #    heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
+        #    heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
+        #    # Normalize to 0-255 and convert to uint8
+        #    heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
+        #    heatmap_uint8 = heatmap_norm.astype(np.uint8)
+        #    # Apply colormap
+        #    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        #    # Save the image
+        #    cv2.imwrite(f'to_del/b_{i}.png', heatmap_color)
+#
+        #    x = pixel_values_copy[0]
+        #    x = x[i,:,:,:]
+        #    x = x.permute(1, 2, 0)
+        #    x = x.cpu().float().numpy()
+        #    x = (x - x.min()) / (x.max() - x.min())
+        #    x = np.float32(x)
+        #    x =  np.uint8(255 * x)
+        #    x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
+        #    x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+        #    cv2.imwrite(f'to_del/b_{i}frame.png', x)
+#
+#
+#
+        #    print("REACHED")
+        #exit(1)
 
-            #import numpy as np
-            #l2 = torch.sum(last_hidden_state[18], dim=1)  # [729]
-            ## Reshape to 27x27
-            #heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
-            ## Upsample to 128x128
-            #heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
-            #heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
-            ## Normalize to 0-255 and convert to uint8
-            #heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
-            #heatmap_uint8 = heatmap_norm.astype(np.uint8)
-            ## Apply colormap
-            #heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-            ## Save the image
-            #cv2.imwrite(f'to_del/b.png', heatmap_color)
-            ##print("REACHED")
-            #exit(1)
+        if self.l2 and self.training:
+            
+            T = 30
+            B = hidden_states.shape[0] // T
+            H, D = hidden_states.shape[1:]  # 729, 1152 
+
+            hidden_states_reshape = last_hidden_state.view(B,T,H,D)
+            f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
+            f_t        = f_t.reshape(B*(T-1),H,D)
+            heatmap = torch.linalg.norm(f_t, dim=-1)           
+            # Compute sum of norms inside the mask
+            inner_norms_sum = torch.sum(heatmap * inner_mask, dim=-1)  # [B*(T-1)]
+            total_norms_sum = torch.sum(heatmap, dim=-1)
+            reg_loss = 1.0 - (inner_norms_sum / (total_norms_sum +  1e-8))
+            reg_loss = torch.mean(reg_loss)
+            movement_vectors_loss = [reg_loss]
+             
         
 
-
         last_hidden_state = self.post_layernorm(last_hidden_state)
+       
 
          #TEMPORAL
-        if self.use_cfg and self.training:
+        if True:
 
             T = 30
             B = hidden_states.shape[0] // T
             H, D = hidden_states.shape[1:]  # 729, 1152 
+
             hidden_states_reshape = last_hidden_state.view(B,T,H,D)
             f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
-            f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
+            if self.foc:
+                f_next = f_t
+            else:
+                f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
             f_t        = f_t.reshape(B*(T-1),H,D)
             f_next     = f_next.reshape(B*(T-1),H,D)
 
             #print(f_t.shape)
-          
 
             flow, _ = global_correlation_softmax(f_t, f_next)
-            flow = flow.permute(0,2,3,1).view(B*(T-1),H,2)
-            '''
+            flow = flow.permute(0,2,3,1).view(B*(T-1),H,2) 
+            print(video_id)
+          
+
+            
+    
+            
             import numpy as np
             import matplotlib.pyplot as plt
             print(flow.shape)
@@ -709,6 +764,21 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
                 x =  np.uint8(255 * x)
                 x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
                 x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+
+                #frame_mask = inner_mask[i].cpu().float().numpy()  # shape [729]
+                #frame_mask = frame_mask.reshape(grid_size, grid_size)  # [27, 27]
+                #x_tinted = x.copy()
+                #for gy in range(grid_size):
+                #    for gx in range(grid_size):
+                #        if frame_mask[gy, gx] == 1:
+                #            y0, y1 = gy * patch_h, (gy + 1) * patch_h
+                #            x0, x1 = gx * patch_w, (gx + 1) * patch_w
+                #            # Tint red: boost red channel a bit
+                #            x_tinted[y0:y1, x0:x1, 0] = np.clip(
+                #                x_tinted[y0:y1, x0:x1, 0] + 80, 0, 255
+                #            )
+                #x = x_tinted
+
                 
                 displacements = flow[i].detach().cpu().numpy()
                 magnitudes = np.linalg.norm(displacements, axis=1)
@@ -723,16 +793,25 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
                 )
                 plt.axis("off")
                 plt.tight_layout()
-                plt.savefig(f"to_del3/frame_{i:03d}X.png", dpi=150)
+                plt.savefig(f"to_del4/frame_{i:03d}X.png", dpi=150)
                 plt.close()
 
             print(flow[0,:,:,:])
-            exit(1)'''
+            exit(1)
             #print(flow.shape)
-            
-            loss_rec = 0.1* self.masked_optical_flow_loss(flow, movement_vectors,pred_visibility,inner_mask=inner_mask,use_mask=self.use_mask, use_emph = self.use_emph)
-                       
-            movement_vectors_loss = [loss_rec]
+
+            #if self.foc:
+            #    coeff = 1.0
+            #
+            #elif self.freeze:
+            #    coeff = 0.6 if self.use_emph == False else 15
+            #else:
+            #    coeff = 0.1 if self.use_emph == False else 2.6
+            #
+            #
+            #loss_rec = coeff* self.masked_optical_flow_loss(flow, movement_vectors,pred_visibility,inner_mask=inner_mask,use_mask=self.use_mask, use_emph = self.use_emph)
+            #           
+            #movement_vectors_loss = [loss_rec]
 
 
         if not return_dict:
@@ -976,7 +1055,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
     in forward. Instead, we override inputs_merger here with custom logic.
     """
 
-    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optflow : False, use_mask : False, use_emph:False):
+    def __init__(self, config: SmolVLMConfig, use_cfg: False, use_optflow : False, use_mask : False, use_emph:False, freeze:False, foc:False, l2: False):
         super().__init__(config)
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
@@ -984,6 +1063,12 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         config.vision_config.use_optflow = True if use_optflow else False
         config.vision_config.use_mask    = True if use_mask else False
         config.vision_config.use_emph    = True if use_emph else False
+        config.vision_config.is_freeze    = True if freeze else False
+        config.vision_config.foc    = True if foc else False
+        config.vision_config.l2    = True if l2 else False
+
+
+
 
 
 
@@ -1075,7 +1160,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
 
     def get_image_features(self, pixel_values: torch.FloatTensor, pixel_attention_mask: torch.LongTensor = None,  movement_vectors:torch.LongTensor = None,
      pred_visibility : Optional[torch.BoolTensor] = None,
-     inner_mask : Optional[torch.BoolTensor] = None ):
+     inner_mask : Optional[torch.BoolTensor] = None, video_id: Optional[str] = None ):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model.
 
@@ -1120,7 +1205,9 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
         # Get sequence from the vision encoder
-        image_hidden_states, movement_vectors_loss = self.vision_model(pixel_values=pixel_values,pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask, movement_vectors= movement_vectors, pred_visibility = pred_visibility, inner_mask = inner_mask )
+        image_hidden_states, movement_vectors_loss = self.vision_model(pixel_values=pixel_values,
+        pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask,
+         movement_vectors= movement_vectors, pred_visibility = pred_visibility, inner_mask = inner_mask, video_id = video_id )
 
 
       
@@ -1153,6 +1240,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         
         pred_visibility : Optional[torch.BoolTensor] = None,
         inner_mask : Optional[torch.BoolTensor] = None,
+        video_id : Optional[str] = None,
 
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
@@ -1196,7 +1284,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         if pixel_values is not None and image_hidden_states is not None:
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
         elif pixel_values is not None:
-            image_hidden_states, movement_vectors_loss = self.get_image_features(pixel_values, pixel_attention_mask, movement_vectors,pred_visibility,inner_mask )
+            image_hidden_states, movement_vectors_loss = self.get_image_features(pixel_values, pixel_attention_mask, movement_vectors,pred_visibility,inner_mask, video_id)
         elif image_hidden_states is not None:
             image_hidden_states = image_hidden_states.to(dtype=self.dtype, device=input_ids.device)
 
@@ -1253,9 +1341,9 @@ class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config, use_cfg=False, use_optflow = False,use_mask=False, use_emph = False ):
+    def __init__(self, config, use_cfg=False, use_optflow = False,use_mask=False, use_emph = False, freeze = False, foc = False, l2= False ):
         super().__init__(config)
-        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optflow = use_optflow, use_mask= use_mask, use_emph = use_emph)
+        self.model = SmolVLMModel(config, use_cfg=use_cfg, use_optflow = use_optflow, use_mask= use_mask, use_emph = use_emph, freeze = freeze, foc = foc, l2= l2)
         self.image_token_id = self.config.image_token_id
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
         self.vocab_size = config.text_config.vocab_size
@@ -1323,6 +1411,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         cache_position: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        video_id : Optional[str] = None,
         
         movement_vectors: Optional[torch.FloatTensor] = None,
         pred_visibility : Optional[torch.BoolTensor] = None,

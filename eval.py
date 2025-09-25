@@ -6,6 +6,7 @@ TODO
 '''
 import os
 from pathlib import Path
+import torch.nn.functional as F
 
 import config
 import argparse
@@ -23,11 +24,14 @@ from torch.nn.utils.rnn import pad_sequence
 from functools import partial
 from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from model_optical_flow import SmolVLMForConditionalGeneration
-
 from model_w_cfg import SmolVLMForConditionalGeneration as BasicModel
 from model_joint_learning import SmolVLMForConditionalGeneration as model_jl
 from model_w_cfg import SmolVLMForConditionalGeneration as model_cfg
-
+from processing_smolvlm import SmolVLMProcessor
+#from internvl.model_internvl import InternVLForConditionalGeneration
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+#from internvl.processing_internvl import InternVLProcessor
 
 
 import config
@@ -42,16 +46,27 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from transformers import AutoProcessor, AutoModelForImageTextToText
 import torch
-from processing_smolvlm import SmolVLMProcessor
 
 
 
 SAMPLES_TO_TEST = [
 
-"GOT-10k_Val_000069",
-#"GOT-10k_Val_000006",
-#"GOT-10k_Val_000015",
+
 #"GOT-10k_Val_000029",
+#"GOT-10k_Val_000001",
+#"GOT-10k_Val_000095",
+
+"GOT-10k_Val_000053",
+
+
+
+#"GOT-10k_Val_000030",
+#"GOT-10k_Val_000029",
+
+
+
+#"GOT-10k_Val_000107",
+#"GOT-10k_Val_000015",
 #"GOT-10k_Val_000085",
 #"GOT-10k_Val_000107",
 #"GOT-10k_Val_000017",
@@ -62,7 +77,6 @@ SAMPLES_TO_TEST = [
 
 
 
-#"GOT-10k_Val_000030",
 
 #"GOT-10k_Val_000022",
 #"GOT-10k_Val_000003",
@@ -71,13 +85,17 @@ SAMPLES_TO_TEST = [
 #"GOT-10k_Val_000132",
 #"GOT-10k_Val_000014",
 
+
+
+
+
 ]
 
 SAMPLES_EMOTIONS_TO_TEST =[
     #"vid1",
     #"vid2",
-    #"vid3",
-    "vid4",
+    "vid3",
+    #"vid4",
     #"vid5",
 ]
 
@@ -89,13 +107,32 @@ def parse_args():
     parser.add_argument('--mode', type=str,
                                 choices=[
                                         'distil_BB_extended', 'distil_optFlow_extended','distil_optFlow_extended_coarse',
-                                        'finetune_joint_learning_extended',
                                         'finetune_cfg_cap', 'finetune_cfg_BB',
                                         'finetune_cfg_optflow_cap', 'finetune_cfg_optflow_BB',
+
+                                        'finetune_cfg_cap_simple_extended',
+                                        'finetune_joint_learning_extended_freeze',
+                                        'finetune_joint_learning_extended_mask_freeze',
+                                        'finetune_joint_learning_extended_mask_emph_freeze',
+
+
+                                        'distil_baseline',
+                                        'finetune_joint_learning_extended',
                                         'finetune_joint_learning_extended_mask',
                                         'finetune_joint_learning_extended_mask_emph',
+                                               
+                                        'finetune_joint_learning_extended_mask_foc_freeze',
+                                        'finetune_joint_learning_extended_foc_freeze',
+                                        'finetune_joint_learning_extended_foc_hard_freeze',
+                                        'finetune_joint_learning_extended_l2_freeze',
+                                        'finetune_joint_learning_extended_mask_l2_freeze',
+                                        
 
-                                        'finetune_cfg_cap_simple_extended'
+
+
+
+
+
                                         ],
                                 default = 'distil_BB_extended',
                                 help='')
@@ -105,8 +142,32 @@ def parse_args():
                                 default = 'vis',
                                 help='')
 
+    parser.add_argument('--epoch', type=int,
+                              
+                                help='')
+
+    parser.add_argument('--eval', type=str,
+                                choices=['blur_video', 'blur_video_ker','tempcomp', 
+                                'tempcomp_caption_matching',
+                                'tempcomp_yes_no', 
+                                'tempcomp_motion_bench',
+                                'tempcomp_motion_bench_sports',
+                                'tempcomp_det_ker_check',
+                                'tempcomp_det_check',
+                                'blur_video_sorted', 'blur_video_ker_sorted',
+
+
+
+                                'tempcomp_mvbench',
+
+                                
+                                
+                                'directions', 'action_rec'],
+                                help='')
+    
+
     parser.add_argument('--model-size', type=str,
-                                choices=['500M', '2.2B', '2.2B_quant'],
+                                choices=['500M', '2.2B', 'internVL'],
                                 default = '2.2B',
                                 help='')
 
@@ -130,16 +191,34 @@ def parse_args():
 
     
     finedtuned_dir   = f'{args.paths[args.dir_type]}/{work_dir}'
-    eval_dir         = f"eval/{work_dir}" if args.compare_mode == "vis" else f"eval/seqVSsingle/{work_dir}"
+    eval_dir         = f"eval/{work_dir}"
+
+    
     os.makedirs(eval_dir,exist_ok=True)
     args.eval_dir = eval_dir
 
     if "BB" in args.mode:
         args.orig_dir = get_last_checkpoint_dir(f'{args.paths["distilled_models"]}/BB_extended/{args.model_size}')
     else:
-        args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+        if "internVL" not in args.model_size:
+            args.orig_dir = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+        else:
+            args.orig_dir = "OpenGVLab/InternVL3-1B-hf"
+
+   
+    if args.eval:
+        if args.epoch is None and 'baseline' in args.mode:
+            args.epoch = 0
+        elif args.epoch is None and 'baseline' not in args.mode:
+            print("MUST SPECIFY EPOCH")
+            exit(1)
+        args.finetuned_dir = f"{finedtuned_dir}/checkpoint-{args.epoch}"
     
-    args.finetuned_dir =  get_last_checkpoint_dir(finedtuned_dir,last=True) #  #args.orig_dir
+    elif "internVL" in args.model_size:
+        args.finetuned_dir = get_last_checkpoint_dir(finedtuned_dir,last=True) if 'baseline' not in args.mode else None
+        
+    else:
+        args.finetuned_dir =  get_last_checkpoint_dir(finedtuned_dir,last=True) if 'baseline' not in args.mode else None
     #args.finetuned_dir = "finetuned_models/joint_learning_extended_mask/2.2B/checkpoint-2100"
     
     args.prompt_orig     = "Describe this video in detail" if "BB" not in args.mode else "Return xyxy coordinates for the object in the video"
@@ -625,8 +704,13 @@ def configure_options(args, model_type):
 
 
 def vis(args):
-    model_types           = ["finetuned"  , "orig" ,    ]
-    processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    model_types           = ["orig" ,"finetuned"  ,            ]
+    if "internVL" not in args.model_size:
+        processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    else:
+        processor_path        = "OpenGVLab/InternVL3-1B-hf"
+
+    
     explainations_compare = []
     prompt                = ""
 
@@ -649,25 +733,57 @@ def vis(args):
        
 
        
-        processor = SmolVLMProcessor.from_pretrained(processor_path)
 
        
-        if args.dir_type == "distilled_models":
-            model = AutoModelForImageTextToText.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            #_attn_implementation="flash_attention_2",
-        ).to("cuda")
+        if "internVL" in args.model_size:  
 
+            if True:
+                model = InternVLForConditionalGeneration.from_pretrained(
+                "finetuned_models/joint_learning_extended_mask_emph_freeze/internVL2/checkpoint-1500",# model_path, #model_path,  #, #  model_path, 
+                dtype=torch.bfloat16,
+                use_emph = ("emph" in args.mode),
+                #is_pooling = True,
+                #_attn_implementation="flash_attention_2",
+                    ).to("cuda")
+                processor = InternVLProcessor.from_pretrained(processor_path)
+                #processor.video_processor.size= { "height": 384,"width": 384}
+            else:
+
+
+            #    bnb_config = BitsAndBytesConfig(
+            #    load_in_4bit=True,
+            #    bnb_4bit_use_double_quant=True,
+            #    bnb_4bit_quant_type="nf4",
+            #    bnb_4bit_compute_dtype=torch.bfloat16
+            #)
+
+
+                model = AutoModelForImageTextToText.from_pretrained(
+                model_path,
+                dtype=torch.bfloat16,
+               # quantization_config=bnb_config
+
+            
+                    ).to("cuda")
+                processor = InternVLProcessor.from_pretrained(processor_path)
+                #processor.video_processor.size= { "height": 384,"width": 384}
+            
+           
             
 
         else:
+            processor = SmolVLMProcessor.from_pretrained(processor_path)
+
             if "joint_learning" in args.mode and model_type=="finetuned":
                 model = model_jl.from_pretrained(
-                model_path,
+               "finetuned_models/joint_learning_extended_mask/2.2B/checkpoint-1800",
                 torch_dtype=torch.bfloat16,
                 use_mask = "mask" in args.mode,
-                use_emph = ("mask" in args.mode) and ("emph" in args.mode)
+                use_emph = ("mask" in args.mode) and ("emph" in args.mode),
+                foc   = ("foc" in args.mode),
+                l2    = ("l2" in args.mode)
+
+
                 #_attn_implementation="flash_attention_2",
                 ).to("cuda")
 
@@ -713,12 +829,12 @@ def vis(args):
       
         for sample in arr_to_test:
 
-            videos        = ["video_blur_full.mp4","video_original.mp4",      ] # , 
+            videos        = ["video_original.mp4",  "video_blur_full.mp4",        ] # , 
             explainations = [None for i in range(len(videos))]
             paths         = [f"{pref_dir}/{sample}/{videos[i]}" for i in range(len(videos))]
            
-            #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_001148/{videos[i]}" for i in range(len(videos))]
-            paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_008365/{videos[i]}" for i in range(len(videos))]
+            #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_003748/{videos[i]}" for i in range(len(videos))]
+            #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_008365/{videos[i]}" for i in range(len(videos))]
 
             #normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
             output_dir = f'{args.eval_dir}/{sample}' 
@@ -736,10 +852,31 @@ def vis(args):
                         "role": "user",
                         "content": [
                             {"type": "video", "path": f"{path}"},
-                            {"type": "text", "text": prompt}
+                            {"type": "text", "text": "Which direction the horse is heading"}, #prompt
                         ]
                     },
                 ]
+
+                
+                #inputs = processor.apply_chat_template(
+                #        messages,
+                #        return_tensors="pt",
+                #        add_generation_prompt=True,
+                #        tokenize=True,
+                #        return_dict=True,
+                #        num_frames=30,).to(model.device)
+#
+                #with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                #    output = model.generate(**inputs, max_new_tokens=128)
+                #decoded_output = processor.batch_decode(
+                #    output,
+                #    skip_special_tokens=True,
+                #)[0].split("assistant\n")[-1]
+                #print(decoded_output)
+                #exit(1)
+                
+                
+
                 #processor.image_processor.video_sampling["max_frames"] = 1
                 #print(processor)
                 #print("\n\n")
@@ -786,7 +923,7 @@ def vis(args):
 
                
                 print(explaination,flush = True)
-                #exit(1)
+                exit(1)
                 
                 
                 #visualize(inputs,pred=parse_loc_string(explaination),indices=indices,vis_pred=True)
@@ -866,99 +1003,468 @@ def vis(args):
 
 
 
-#BB - blurry vs. standard
-#optical - blurry vs. standard
-# optical+blurry vs. standard
-#optical+blurry vs. standard
+def collate_fn_QA(examples,image_token_id,model,processor, extended, num_frames, open_cap,cap, with_dim, ker, des_prompt, is_det, is_internVL, return_video_id):
+    videoPath = "video_path"
+    instances = []
+    answers = []
+    for example in examples:
 
-#rest - finetuned
+        print(example[videoPath])
+
+        if open_cap == False:
+            question = example['question']
+            actual_question =question.split("\n")[0]
+            choices = question.split("\n")[1:]
+            choices = "\n".join(choices)
+            #print(choices)
+            actual_question =  f"Question: {actual_question}\nPossible answers:\n"
+            question = actual_question + choices + f"\n\n{des_prompt}"
+
+            
+            
+        else:
+            question = cap
+
+       
+
+       # _,indices =  processor.apply_chat_template(dummy_input, add_generation_prompt=False, extended = extended, num_frames = num_frames,tokenize=True, return_dict=True, return_tensors="pt", return_frame_indices=True)
+        if open_cap:
+            user_content = [{"type": "video", "path": example[videoPath]}]
+            user_content.append({"type": "text", "text": question})
+            
+        
+        else:
+            user_content = [{"type": "video", "path": example[videoPath]}]
+            user_content.append({"type": "text", "text": question})
+
+        messages = [
+            {"role": "user", "content": user_content},
+        ]
+
+        if is_internVL:
+            instance = processor.apply_chat_template(messages,
+                        return_tensors="pt",
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        num_frames=30,).to(model.device, dtype=torch.bfloat16)
+                    
+            #print(processor.batch_decode(instance["input_ids"],skip_special_tokens=True,)[0])
+            #print("----------------")
+        else:
+            instance = processor.apply_chat_template(messages, add_generation_prompt=True, extended = extended, num_frames = num_frames,
+                                                 tokenize=True, return_dict=True, return_tensors="pt").to(model.device, dtype=torch.bfloat16)
+
+        
+        dim = 0 if is_internVL else 1
+
+        if instance["pixel_values"].shape[dim] < 30:
+            
+            #return {}
+            frames_to_add = 30 - instance["pixel_values"].shape[dim]
+
+            if is_internVL:
+                instance["pixel_values"] = torch.cat([instance["pixel_values"], instance["pixel_values"][-1:].repeat(frames_to_add, 1, 1, 1, 1)], dim=0)
+                
+                instance["attention_mask"] = torch.cat([
+                    instance["attention_mask"], 
+                    instance["attention_mask"][-1:].repeat(frames_to_add, 1,  1, 1)  # Only 4 dimensions here
+                ], dim=0)
+            
+            else:
+                instance["pixel_values"] = torch.cat([instance["pixel_values"], instance["pixel_values"][:, -1:].repeat(1, frames_to_add, 1, 1, 1)], dim=1)
+            
+                instance["pixel_attention_mask"] = torch.cat([
+                    instance["pixel_attention_mask"], 
+                    instance["pixel_attention_mask"][:, -1:].repeat(1, frames_to_add, 1, 1)  # Only 4 dimensions here
+                ], dim=1)
+
+
+        
+        if open_cap or is_det:
+        
+            instance["pixel_values"] = instance["pixel_values"].unsqueeze(0)
+            
+            print(instance["attention_mask"].shape)
+            #instance["attention_mask"] = instance["attention_mask"].unsqueeze(0)
+            #instance["input_ids"] = instance["input_ids"].unsqueeze(0)
+           
+            video_tensor = instance["pixel_values"]
+            
+            batch_size, num_frames, channels, height, width = video_tensor.shape
+            original_size = (height, width)
+            downsample_factors = [1, 2, 4, 8, 16, 32]  # Original + 4 downsampled versions
+            
+            # List to store all video versions
+            video_versions = []
+
+            if ker:
+                blur_kernel_sizes = [1, 15, 25, 35, 45, 75]
+                for kernel_size in blur_kernel_sizes:
+                    if kernel_size == 1:
+                        # Keep original video as is
+                        video_versions.append(video_tensor)
+                    else:
+                        # Calculate sigma for Gaussian blur (rule of thumb: sigma = kernel_size / 6)
+                        sigma = kernel_size / 6.0
+                        
+                        # Reshape to process all frames together: [1*30, 3, 384, 384]
+                        video_reshaped = video_tensor.view(-1, channels, height, width)
+                        
+                        # Apply Gaussian blur
+                        # Note: We need to apply blur to each channel separately if using conv2d
+                        # Alternative: use torchvision.transforms.functional.gaussian_blur if available
+                        
+                        # Create Gaussian kernel
+                        kernel_1d = torch.exp(-0.5 * ((torch.arange(kernel_size) - kernel_size // 2) / sigma) ** 2)
+                        kernel_1d = kernel_1d / kernel_1d.sum()
+                        kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
+                        kernel_2d = kernel_2d.expand(channels, 1, kernel_size, kernel_size).to(video_tensor.device, dtype=video_tensor.dtype)
+                        
+                        # Apply convolution with padding to maintain size
+                        padding = kernel_size // 2
+                        video_blurred = F.conv2d(
+                            video_reshaped, 
+                            kernel_2d, 
+                            padding=padding, 
+                            groups=channels
+                        )
+                        
+                        # Reshape back to original format: [1, 30, 3, 384, 384]
+                        video_processed = video_blurred.view(batch_size, num_frames, channels, height, width)
+                        video_versions.append(video_processed)
+            else:
+                # Process the original video tensor for each downsample factor
+                for downsample_factor in downsample_factors:
+                    if downsample_factor == 1:
+                        # Keep original video as is
+                        video_versions.append(video_tensor)
+                    else:
+                        # Calculate new size after downsampling
+                        new_height = height // downsample_factor
+                        new_width = width // downsample_factor
+                        new_size = (new_height, new_width)
+
+                        # Reshape to process all frames together: [1*30, 3, 384, 384]
+                        video_reshaped = video_tensor.view(-1, channels, height, width)
+
+                        # Downsample
+                        video_downsampled = F.interpolate(
+                            video_reshaped, 
+                            size=new_size, 
+                            mode='bilinear', 
+                            align_corners=False
+                        )
+
+                        # Upsample back to original size
+                        video_upsampled = F.interpolate(
+                            video_downsampled, 
+                            size=original_size, 
+                            mode='bilinear', 
+                            align_corners=False
+                        )
+
+                        # Reshape back to original format: [1, 30, 3, 384, 384]
+                        video_processed = video_upsampled.view(batch_size, num_frames, channels, height, width)
+                        video_versions.append(video_processed)
+            
+            # Stack all versions along batch dimension: [5, 30, 3, 384, 384]
+            video_final = torch.cat(video_versions, dim=0)
+            instance["pixel_values"] = video_final
+            
+            # Expand other tensors to match the new batch size
+            num_versions = len(downsample_factors)  # 5
+            
+            #instance["attention_mask"] = instance["attention_mask"].repeat(num_versions, 1, 1, 1)
+            
+            # Repeat input_ids along batch dimension - check if 2D or 1D
+            if instance["input_ids"].dim() == 2:  # [1, seq_len]
+                instance["input_ids"] = instance["input_ids"].repeat(num_versions, 1)
+            else:  # [seq_len]
+                instance["input_ids"] = instance["input_ids"].unsqueeze(0).repeat(num_versions, 1)
+            
+            # Repeat attention_mask along batch dimension - check if 2D or 1D
+            if instance["attention_mask"].dim() == 2:  # [1, seq_len]
+                instance["attention_mask"] = instance["attention_mask"].repeat(num_versions, 1)
+            else:  # [seq_len]
+                instance["attention_mask"] = instance["attention_mask"].unsqueeze(0).repeat(num_versions, 1)
+       
+        
+        '''
+        print(video_final.shape)
+        video_final = video_final[2]
+        print(video_final.shape)
+        
+        for i in range(video_final.shape[0]):
+
+            x = video_final[i,:,:,:]
+            x = x.permute(1, 2, 0)
+            x = x.cpu().float().numpy()
+            x = (x - x.min()) / (x.max() - x.min())
+            x = np.float32(x)
+            x =  np.uint8(255 * x)
+            x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
+        
+            x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+       
+            plt.imsave(f"to_del4/imgX_{i}.png", x)
+        
+        exit(1)'''
+
+       
+        res = {"input": instance,
+        "gt": example['answer']}
+
+        if with_dim and is_det == False:
+            res["dim"] = example['dim']
+        if  return_video_id:
+            res["video_id"] = example[videoPath]
+        return res
+        
+
+
+        instances.append(instance)
+        answers.append(example['answer'])
+
+
+    input_ids = pad_sequence(
+        [inst["input_ids"].squeeze(0) for inst in instances],
+        batch_first=True,
+        padding_value=processor.tokenizer.pad_token_id
+    )
+    attention_mask = pad_sequence(
+        [inst["attention_mask"].squeeze(0) for inst in instances],
+        batch_first=True,
+        padding_value=0
+    )
+    labels = pad_sequence(
+        [inst["input_ids"].squeeze(0).clone() for inst in instances],
+        batch_first=True,
+        padding_value=-100
+    )
+
+    #labels[labels == image_token_id] = -100
+
+    out = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+        "gt": answers
+    }
+
+
+    # Step 1: figure out maximum frames, height, width across the batch
+    pvs = [inst["pixel_values"].squeeze(0) for inst in instances if "pixel_values" in inst]
+    if pvs:  # there is at least one non-None pixel_values
+        max_frames = max(pv.shape[0] for pv in pvs)
+        max_h = max(pv.shape[-2] for pv in pvs)
+        max_w = max(pv.shape[-1] for pv in pvs)
+    else:
+        max_h = max_w = processor.video_size['longest_edge']
+        max_frames = 1
+
+    padded_pixel_values_list = []
+    for ex in instances:
+        pv = ex.get("pixel_values", None).squeeze(0)
+
+        if pv is None:
+            # text-only => fill pixel data + mask with zeros
+            shape_pv = (max_frames, 3, max_h, max_w)
+            padded_pv = torch.zeros(shape_pv, dtype=torch.float32)
+        else:
+            f, c, h, w = pv.shape
+            # Prepare final storage
+            padded_pv = torch.zeros(
+                (max_frames, c, max_h, max_w),
+                dtype=pv.dtype,
+                device=pv.device
+            )
+            padded_pv[:f, :, :h, :w] = pv
+        padded_pixel_values_list.append(padded_pv)
+
+    out["pixel_values"] = torch.stack(padded_pixel_values_list, dim=0)
+    return out
+
+
+
+
+
 
 def eval(args):
 
-    d_eval = {}
+    if args.eval:
+        modelTXT = SentenceTransformer('all-MiniLM-L6-v2')
 
-    test_dir = Path("dataset/GOT10KVAL_teacher")
-    subdirs = sorted([d for d in test_dir.iterdir() if d.is_dir()])
-    video_files_list = []
-    video_blur_files_list = []
-
-    for subdir in subdirs:
-        file_video_path = subdir / "video_original.mp4"
-        file_video_blur_path = subdir / "video_blur_full.mp4"
-        if file_video_path.exists():
-            video_files_list.append(str(f"{test_dir}/{file_video_path.relative_to(test_dir)}"))
-            video_blur_files_list.append(str(f"{test_dir}/{file_video_blur_path.relative_to(test_dir)}"))
-
-   
-    
-    all_video_files_list = [video_files_list, video_blur_files_list]
-
-    if args.mode == "optFlow" not in args.mode:
-        model_types           = [ "finetuned",    ]
-    else:
-        model_types           = ["finetuned",   "orig",    ]
-
-    processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-    
-  
-    for model_type in model_types:
-        ops = configure_options(args, model_type)
-        model_path  = ops["model_path"]
-        prompt      = ops["prompt"]
-        use_cfg     = ops["use_cfg"]
-        use_optflow = ops["use_optflow"]
-       
-        processor = SmolVLMProcessor.from_pretrained(processor_path)
-
-        if args.dir_type == "distilled_models":
-            model = AutoModelForImageTextToText.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            #_attn_implementation="flash_attention_2",
-        ).to("cuda")
+        d = {}
+     
+        model_path = args.orig_dir if "baseline" in args.mode else args.finetuned_dir
+        prompt_finetune = args.prompt_orig if "baseline" in args.mode else args.prompt_finetune
+        if args.model_size == "internVL":
+            processor_path        = "OpenGVLab/InternVL3-1B-hf"
+            processor = InternVLProcessor.from_pretrained(processor_path)
 
         else:
-            model = SmolVLMForConditionalGeneration.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-                use_cfg = False,
-                use_optflow = use_optflow,
-            ).to("cuda")
+            processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+            processor = SmolVLMProcessor.from_pretrained(processor_path)
+
+
+        
+        downsample_factors = [1, 2, 4, 8, 16, 32] if "ker" not in args.mode else [1, 15, 25, 35, 45, 75]
+
+ 
+
+        #processor.padding_side = "right"
+        #processor.tokenizer.padding_side = "right"
+
         
 
-        for i in range(len(all_video_files_list)):
-            if i == 0:
-                video_type = "standard"
+        if args.model_size == "internVL":
+            if args.dir_type != "distilled_models":
+                model = InternVLForConditionalGeneration.from_pretrained(
+                model_path,
+                dtype=torch.bfloat16,
+                use_emph = ("emph" in args.mode),
+                #_attn_implementation="flash_attention_2",
+                    ).to("cuda")
+
             else:
-                video_type = "blur"
+                model = AutoModelForImageTextToText.from_pretrained(
+                model_path,
+                dtype=torch.bfloat16,
             
-            d_eval[video_type] = {}
-            d_eval[video_type]["num"] = 0
-            if "BB" in args.mode:
-                d_eval[video_type]["iou"] = 0
-            else:
-                d_eval[video_type]["inner"] = 0
-                d_eval[video_type]["outer"] = 0
+                    ).to("cuda")
 
-
-
-
-
-            videos_lst = all_video_files_list[i]
-            for video_path in videos_lst:
+        else:
+            if args.dir_type == "distilled_models":
                 
-               
-                messages = [
+                model = SmolVLMForConditionalGeneration.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                #_attn_implementation="flash_attention_2",
+            ).to("cuda")
+
+            else:
+
+                if "joint_learning" in args.mode and args.dir_type=="finetuned_models":
+                    model = model_jl.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16,
+                    use_mask = "mask" in args.mode,
+                    use_emph = ("mask" in args.mode) and ("emph" in args.mode),
+                    foc   = ("foc" in args.mode),
+                    l2    = ("l2" in args.mode)
+                    #_attn_implementation="flash_attention_2",
+                    ).to("cuda")
+        
+        image_token_id = None
+        if args.model_size != "internVL":
+            image_token_id = processor.tokenizer.additional_special_tokens_ids[
+            processor.tokenizer.additional_special_tokens.index("<image>")
+            ]
+
+        d["num_total"] = 0
+
+        des_prompt = None
+        
+        if args.eval == 'directions':
+            
+            d["num_correct_precise"]= 0
+            d["num_correct"]= 0
+
+            args.dataset_csv =  "dataset/tempcomp/filtered_data.csv"
+        elif 'blur_video' in args.eval: 
+            for i in downsample_factors:
+                d[i] = {}
+                d[i]["sim"]= 0
+            if 'sorted' in args.eval:
+                args.dataset_csv =  "dataset/got10k/sorted_output_file.csv"
+            else:
+                args.dataset_csv =  "dataset/got10k/video_data_Eval.csv"
+    
+
+        elif args.eval == 'tempcomp':
+            args.dataset_csv =  "dataset/tempcomp/all_data.csv"
+            des_prompt = "Answer only with the option from the given choices directly." if args.model_size == "internVL" else "Answer with the letter.\n"
+        
+        elif args.eval == 'tempcomp_motion_bench':
+            args.dataset_csv =  "dataset/motion_bench/all_data.csv"
+            des_prompt = "Answer with the option's letter from the given choices directly." if args.model_size == "internVL" else "Answer with the letter.\n"
+
+        elif args.eval == 'tempcomp_motion_bench_sports':
+            args.dataset_csv =  "dataset/motion_bench/all_data_sports_fixed.csv"
+            des_prompt = "Answer only with the option from the given choices directly."
+
+
+        elif args.eval == 'tempcomp_mvbench':
+            args.dataset_csv =  "dataset/mvbench/all_data.csv"
+            des_prompt = "Answer with the option's letter from the given choices directly." if args.model_size == "internVL" else "Answer with the letter.\n"
+
+        elif args.eval == 'tempcomp_caption_matching':
+            args.dataset_csv =  "dataset/tempcomp/all_data_caption_matching.csv"
+            des_prompt = "Answer only with the option from the given choices directly." if args.model_size == "internVL" else ""
+
+
+        elif args.eval == 'tempcomp_yes_no':
+            args.dataset_csv =  "dataset/tempcomp/all_data_yes_no.csv"
+            des_prompt = "Answer yes or no.\n"
+
+        
+        elif 'tempcomp_det' in args.eval:
+            args.dataset_csv =  "dataset/activity/all_data.csv"
+            des_prompt = "Answer with the option's letter from the given choices directly." if args.model_size == "internVL" else "Answer with the letter.\n"  
+            
+        
+      
+        print(prompt_finetune)
+        
+        data_collator = partial(collate_fn_QA, image_token_id=image_token_id, 
+        model=model, processor=processor, extended=True, 
+        num_frames=30,open_cap = ('blur_video' in args.eval), 
+        is_det = ('tempcomp_det' in args.eval),
+        cap = prompt_finetune,
+        with_dim = ('tempcomp' in args.eval),
+        ker = (args.eval =='blur_video_ker_sorted') or (args.eval =='blur_video_ker') or (args.eval =='tempcomp_det_ker_check'),
+        des_prompt=des_prompt,
+        is_internVL = (args.model_size == "internVL"))  
+
+        
+        
+        dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
+        #if True:
+        #    dataset = dataset.select(range(25))
+
+       
+        if 'blur_video' in args.eval:
+            if 'sorted' in args.eval:
+                dataset = dataset.select(range(1000))
+            else:
+                dataset = dataset.shuffle(seed=42).select(range(1500))
+        
+        
+        dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=1,
+                collate_fn=data_collator,
+                shuffle=False
+        )
+
+        tot_len = len(dataloader)
+        for idx, batch in enumerate(dataloader):
+            print(f"{idx}/{tot_len}")
+
+            '''prompt = "What is the direction of the man?\nPossible answers:\nA. moving towards the camera\nB. moving from left to right\nC. moving away from the camera\n\nAnswer with the letter (A,B, or C)."
+            
+            messages = [
                     {
                         "role": "user",
                         "content": [
-                            {"type": "video", "path": f"{video_path}"},
+                            {"type": "video", "path": "dataset/tempcomp/videos/1034419625.mp4"},
                             {"type": "text", "text": prompt}
                         ]
                     },
                 ]
 
-                inputs, indices = processor.apply_chat_template(
+            inputs, indices = processor.apply_chat_template(
                         messages,
                         add_generation_prompt=True,
                         tokenize=True,
@@ -970,50 +1476,374 @@ def eval(args):
                         #do_resize     = False
                     )
                 
-                indices[-1] = indices[-1] -1
-
                 
-                inputs = inputs.to(model.device, dtype=torch.bfloat16)
+            inputs = inputs.to(model.device, dtype=torch.bfloat16)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=128)
 
-                if use_cfg:
-                    pred_tracks, pred_visibility = collect_tracks(None, f"debug_tracks/{sample}", 
-                                          indices, 
-                                          inputs.pixel_values.shape[-1], 
-                                          inputs.pixel_values.shape[-2],
-                                          skip_parse=True)
-
-                    inputs['pred_tracks'] = pred_tracks
-                    inputs['pred_visibility'] = pred_visibility
-                
-                generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=2048)
-                
-                generated_texts = processor.batch_decode(
+            generated_texts = processor.batch_decode(
                     generated_ids,
                     skip_special_tokens=True,
                 )
-                explaination = generated_texts[0].split("Assistant: ")[-1]
+            explaination = generated_texts[0]
 
-                eval_performance(d_eval,video_type, explaination, indices, args.mode, video_path, inputs["pixel_values"].shape[-1] )
-                #gt_data =  get_gt(args.mode, indices, video_path, inputs["pixel_values"].shape[-1])
-                #gt_data = np.array(gt_data)
+               
+            print(explaination,flush = True)
+            gt = batch["gt"]
+
+            print(gt)
+            exit(1)'''
+            if batch == {}:
+                continue
+            gt = batch["gt"]
+            dim = None
+            if ('tempcomp' in args.eval) and ("tempcomp_det" not in args.eval):
+                dim = batch["dim"]
 
 
-                #model_pred =  parse_loc_string(explaination)
-                #model_pred = np.array(model_pred)
+            inputs =  {k: v for k, v in batch.items() if (k != "gt" and k != "dim")} 
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                generated_ids = model.generate(**inputs["input"], do_sample=False, max_new_tokens=128)
+            generated_texts = processor.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                )
 
-                #gt_data    = gt_data[indices]
+   
+            
+            if args.model_size == "internVL":
 
-                #for j in range(min(len(gt_data), len(model_pred))):
-                #    d_eval[video_type]["num"]+=1
-                #    eval_performance_per_frame(d_eval,video_type,args.mode, model_pred[j], gt_data[j])
-                #    if j == 1:
-                #        break
-                break
+                #print(generated_texts[0])
+                #exit(1)
+
+                explainations = [ex.split("assistant\n")[-1] for ex in generated_texts] 
+                explainations = [ex.split("Answer:")[-1] for ex in explainations]
+                explainations = [ex.split("Answer: ")[-1] for ex in explainations] 
+                #explainations = generated_texts
+                #print("")
+
+                 
+            else:
+                explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts] 
+            for i, ex in enumerate(explainations):
+
+                if args.eval == 'directions' or 'tempcomp' in args.eval:
+                    if 'tempcomp' in args.eval:
+                        if dim is None:
+                            dim = downsample_factors[i]
+                        if dim not in d:
+                            d[dim] = {}
+                            d[dim]["num_correct"] = 0
+                            d[dim]["num_correct_precise"] = 0
+                            d[dim]["num_total"] = 0
+                        d[dim]["num_total"]+=1
+
+                    if  'tempcomp_det' in args.eval:
+                        #print("\n")
+                        gt_letter = gt.split(".")[0]
+                        if ex ==gt:
+                            d[downsample_factors[i]]["num_correct"]+=1
+                       
+                        elif ex.split(".")[0] == gt_letter:
+                            d[downsample_factors[i]]["num_correct_precise"]+=1
+                            d[downsample_factors[i]]["num_correct"]+=1
+                        
+                        
+                        else:
+                            print("FAIL")
+                            print(ex)
+                            print(gt)
+                            print("-----------------")
+
+                
+                        continue
+                    
+                    gt_letter = gt.split(".")[0]
+                    if args.eval == 'tempcomp_yes_no':
+                        ex = ex.lower()
+
+                    if ex.split(".")[0] == gt_letter:
+                        if 'tempcomp' in args.eval:
+                            d[dim]["num_correct_precise"]+=1
+                            d[dim]["num_correct"]+=1
+                        else:
+                            d["num_correct_precise"]+=1
+                            d["num_correct"]+=1
+                            print("SUCCESS")
+                    
+                    elif (gt in ex) or ((gt.split(":")[0].split(" ")[-1] == ex.split(":")[0].split(" ")[-1]) and (args.eval == 'tempcomp_caption_matching')):
+
+                
+                        if 'tempcomp' in args.eval:
+                            d[dim]["num_correct"]+=1
+                        else:
+                            d["num_correct"]+=1
+                        
+                        
+                        print("SUCCESS2")
+                       
+
+                    
+                    else:
+                        #print(generated_texts)
+                        print("FAIL")
+                        print(ex)
+                        print(gt)
+                        #exit(1)
+                        print("-----------------")
+                    
+                else:
+                  
+                    original_embedding = modelTXT.encode([ex])
+                    degraded_embedding = modelTXT.encode([explainations[0]])
+
+                    similarity = cosine_similarity(original_embedding, degraded_embedding)[0][0]
+                                    
+                    d[downsample_factors[i]]["sim"]+=float(similarity)
+                    
+                
+                d["num_total"]+=1
+        
+        
+        print(args.eval_dir)
+        
+
+
+        update_json(f"{args.eval_dir}/res_{args.eval}_{args.epoch}.json",d)
+        exit(1)
+
+
+            
+
+            
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def eval_check_qual(args):
+
+    if True:
+        modelTXT = SentenceTransformer('all-MiniLM-L6-v2')
+
+        d = {}
+        dd = {}
+     
+        model_path = args.orig_dir if "baseline" in args.mode else args.finetuned_dir
+        prompt_finetune = args.prompt_orig if "baseline" in args.mode else args.prompt_finetune
+        if args.model_size == "internVL":
+            processor_path        = "OpenGVLab/InternVL3-1B-hf"
+            processor = InternVLProcessor.from_pretrained(processor_path)
+
+        else:
+            processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+            processor = SmolVLMProcessor.from_pretrained(processor_path)
+
+
+        
+        downsample_factors = [1, 2, 4, 8, 16, 32] if "ker" not in args.mode else [1, 15, 25, 35, 45, 75]
+
+
+        if False:
+            pass
+           
+
+        else:
+            if args.dir_type == "distilled_models":
+                model = SmolVLMForConditionalGeneration.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                #_attn_implementation="flash_attention_2",
+            ).to("cuda")
+
+            else:
+
+                if "joint_learning" in args.mode and args.dir_type=="finetuned_models":
+                    model = model_jl.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16,
+                    use_mask = "mask" in args.mode,
+                    use_emph = ("mask" in args.mode) and ("emph" in args.mode),
+                    foc   = ("foc" in args.mode),
+                    l2    = ("l2" in args.mode)
+                    #_attn_implementation="flash_attention_2",
+                    ).to("cuda")
+        
+        image_token_id = None
+        if args.model_size != "internVL":
+            image_token_id = processor.tokenizer.additional_special_tokens_ids[
+            processor.tokenizer.additional_special_tokens.index("<image>")
+            ]
+
+ 
+
+        des_prompt = "Answer yes or no.\n"
+        args.dataset_csv =  "dataset/tempcomp/all_data_yes_no.csv"
+
+        
+        
+        
+        data_collator = partial(collate_fn_QA, image_token_id=image_token_id, 
+        model=model, processor=processor, extended=True, 
+        num_frames=30,open_cap = ('blur_video' in args.eval), 
+        is_det = ('tempcomp_det' in args.eval),
+        cap = prompt_finetune,
+        with_dim = ('tempcomp' in args.eval),
+        ker = (args.eval =='blur_video_ker_sorted') or (args.eval =='blur_video_ker') or (args.eval =='tempcomp_det_ker_check'),
+        des_prompt=des_prompt,
+        is_internVL = (args.model_size == "internVL"),
+        return_video_id = True)  
+
+        
+        
+        dataset = load_dataset("csv", data_files=args.dataset_csv)["train"]
+
+       
+        
+        dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=1,
+                collate_fn=data_collator,
+                shuffle=False
+        )
+
+        tot_len = len(dataloader)
+        for idx, batch in enumerate(dataloader):
+            print(f"{idx}/{tot_len}")
+
+          
+            if batch == {}:
+                continue
+            gt = batch["gt"]
+            dim = None
+            dim = batch["dim"]
+            video_id = batch["video_id"]
+            p_dir = video_id.split(".")[0]
+
+
+            if os.path.isdir(p_dir) == False:
+                print(f"Directory  {p_dir} no exists")
+                continue
+            real_vidID = (video_id.split(".")[0]).split("/")[-1]
+            if real_vidID not in dd:
+                dd[real_vidID] = 0
+            dd[real_vidID]+=1
+            real_vidID =f"{real_vidID}##{dd[real_vidID]}"
+      
+        
+
+            inputs =  {k: v for k, v in batch.items() if (k != "gt" and k != "dim")} 
+            inputs["input"]["video_id"] = real_vidID
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                generated_ids = model.generate(**inputs["input"], do_sample=False, max_new_tokens=128)
+            generated_texts = processor.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                )
+
+   
+            explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts] 
             
             
-            
-    print(d_eval)
+            for i, ex in enumerate(explainations):
+                
+
     
+                gt_letter = gt.split(".")[0]
+                ex = ex.split(".")[0]
+                if args.eval == 'tempcomp_yes_no':
+                    ex = ex.lower()
+
+
+                sym = "C" if gt_letter == ex else "W"
+                if sym == "W":
+                    print(gt_letter)
+                    print(ex)
+                    
+                open(f"check_res3/{real_vidID}_${dim}$_{sym}.txt", "w").close()
+
+            
+
+
+
+def extract_info(args):
+    from collections import defaultdict
+
+     # Paths
+    base_dir = "check_res3"       # contains .txt and flow_*.pt
+    gt_dir = "dataset/tempcomp/videos"  # ground truth subfolders by ID
+
+    results = defaultdict(list)
+
+    for fname in os.listdir(base_dir):
+        if not fname.endswith(".txt"):
+            continue
+
+        # Parse filename
+        # Example: 1034419625##1_animals$_W.txt
+        stem = fname[:-4]
+        try:
+            id_i, category_letter = stem.split("_", 1)
+            category, letter = category_letter.split("$_")
+            letter = letter  # "W" or "C"
+            category = category.split("$")[-1]
+            print(id_i, category, letter)
+          
+        except ValueError:
+            print("Skipping malformed:", fname)
+            continue
+
+        # Prediction file
+        flow_path = os.path.join(base_dir, f"flow_{id_i}.pt")
+        if not os.path.exists(flow_path):
+            print("Missing flow:", flow_path)
+            continue
+        pred = torch.load(flow_path)  # [29,2]
+
+        # Ground truth file: gt_dir/{ID}/*.pt
+        ID = id_i.split("##")[0]
+        gt_subdir = os.path.join(gt_dir, ID, "tracks_cuts_grid")
+        if not os.path.isdir(gt_subdir):
+            print("Missing gt dir:", gt_subdir)
+            continue
+        gt_files = [f for f in os.listdir(gt_subdir) if f.endswith("pred_tracks.pt")]
+        if not gt_files:
+            print("No gt in:", gt_subdir)
+            continue
+        gt = torch.load(os.path.join(gt_subdir, gt_files[0]))  # assume first
+
+        # Compute L1
+        l1 = torch.abs(pred - gt).mean().item()
+        results[(category, letter)].append(l1)
+
+    # Report averages
+    for (category, letter), vals in results.items():
+        avg_l1 = sum(vals) / len(vals)
+        print(f"Category={category}, {letter}: Avg L1 = {avg_l1:.6f} over {len(vals)} samples")
+
+
 
 
 
@@ -1023,6 +1853,14 @@ def eval(args):
 if __name__ == "__main__":
     args          = parse_args()
     config.get_config(args)
+
+    #extract_info(args)
+    #exit(1)
+#
+#
+    #eval_check_qual(args)
+    #exit(1)
+
     if args.compare_mode == "vis":
         vis(args)
     else:

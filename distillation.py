@@ -21,6 +21,10 @@ from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model
 from processing_smolvlm import SmolVLMProcessor
 import numpy as np
 import random
+from modules.utils.callback import  CustomTrainer, compute_custom_metrics
+
+
+
 
 import config
 import argparse
@@ -41,6 +45,13 @@ def parse_args():
                                 default = '2.2B',
                                 help='')
     
+
+    parser.add_argument('--eval', type=str,
+                                choices=['blur_video', 'directions', 'action_rec'],
+                                help='')
+
+
+
     args = parser.parse_args()
     config.get_config(args)
 
@@ -239,6 +250,122 @@ def collate_fn_blur(examples,image_token_id,model,processor, withBlur, extended,
 
     out["pixel_values"] = torch.stack(padded_pixel_values_list, dim=0)
     return out
+
+
+
+
+
+
+
+
+
+def collate_fn_QA(examples,image_token_id,model,processor, extended, num_frames):
+    videoPath = "video_path"
+    instances = []
+    for example in examples:
+       
+
+        question = example['question']
+        actual_question =question.split("?")[0]
+        choices = question.split("?")[1:]
+        
+        actual_question =  f"Question: {actual_question}?"
+        
+        
+        question = actual_question + choices[0] + "\nAnswer with a single letter."
+        question = "Caption the video."
+
+       
+        dummy_input = [{"type": "text", "text": f"{question}"}]
+        dummy_input.append({"type": "video", "path": example[videoPath]})
+        dummy_input = [
+            {"role": "user", "content": dummy_input},
+            {"role": "assistant", "content": [{"type": "text", "text": f""}]}
+        ]
+
+        _,indices =  processor.apply_chat_template(dummy_input, add_generation_prompt=False, extended = extended, num_frames = num_frames,
+                                                 tokenize=True, return_dict=True, return_tensors="pt", return_frame_indices=True)
+        
+        
+
+        
+
+        
+        user_content = [{"type": "text", "text": question}]
+        user_content.append({"type": "video", "path": example[videoPath]})
+
+        messages = [
+            {"role": "user", "content": user_content},
+            #{"role": "assistant", "content": [{"type": "text", "text": f"{example['answer']}"}]}
+        ]
+
+        #print(messages)
+
+        instance = processor.apply_chat_template(messages, add_generation_prompt=True, extended = extended, num_frames = num_frames,
+                                                 tokenize=True, return_dict=True, return_tensors="pt").to("cuda").to(model.dtype)
+        
+
+
+        instances.append(instance)
+
+
+    input_ids = pad_sequence(
+        [inst["input_ids"].squeeze(0) for inst in instances],
+        batch_first=True,
+        padding_value=processor.tokenizer.pad_token_id
+    )
+    attention_mask = pad_sequence(
+        [inst["attention_mask"].squeeze(0) for inst in instances],
+        batch_first=True,
+        padding_value=0
+    )
+    labels = pad_sequence(
+        [inst["input_ids"].squeeze(0).clone() for inst in instances],
+        batch_first=True,
+        padding_value=-100
+    )
+
+    labels[labels == image_token_id] = -100
+
+    out = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels
+    }
+
+
+    # Step 1: figure out maximum frames, height, width across the batch
+    pvs = [inst["pixel_values"].squeeze(0) for inst in instances if "pixel_values" in inst]
+    if pvs:  # there is at least one non-None pixel_values
+        max_frames = max(pv.shape[0] for pv in pvs)
+        max_h = max(pv.shape[-2] for pv in pvs)
+        max_w = max(pv.shape[-1] for pv in pvs)
+    else:
+        max_h = max_w = processor.video_size['longest_edge']
+        max_frames = 1
+
+    padded_pixel_values_list = []
+    for ex in instances:
+        pv = ex.get("pixel_values", None).squeeze(0)
+
+        if pv is None:
+            # text-only => fill pixel data + mask with zeros
+            shape_pv = (max_frames, 3, max_h, max_w)
+            padded_pv = torch.zeros(shape_pv, dtype=torch.float32)
+        else:
+            f, c, h, w = pv.shape
+            # Prepare final storage
+            padded_pv = torch.zeros(
+                (max_frames, c, max_h, max_w),
+                dtype=pv.dtype,
+                device=pv.device
+            )
+            padded_pv[:f, :, :h, :w] = pv
+        padded_pixel_values_list.append(padded_pv)
+
+    out["pixel_values"] = torch.stack(padded_pixel_values_list, dim=0)
+    return out
+
 
 
 
@@ -451,6 +578,8 @@ def basic_distillation(args):
         print(model.get_nb_trainable_parameters())
     else:
         processor = AutoProcessor.from_pretrained(processor_id) if (("BB" not in args.mode) and ("optFlow" not in args.mode)) else SmolVLMProcessor.from_pretrained(processor_id)
+        processor =SmolVLMProcessor.from_pretrained(processor_id)
+        
         model = AutoModelForImageTextToText.from_pretrained(
             model_id,
             torch_dtype=torch.bfloat16,
@@ -501,10 +630,23 @@ def basic_distillation(args):
         remove_unused_columns=False,
         gradient_checkpointing=True,
      
-        dataloader_pin_memory=False
+        dataloader_pin_memory=False,
+
+
+        batch_eval_metrics = args.eval is not None,
+        per_device_eval_batch_size=8,
+        evaluation_strategy="steps",
+        eval_on_start =args.eval is not None,
+
     )
     #resume_from_checkpoint=True
-    if (("BB" in args.mode) or ("optFlow" in args.mode)):
+
+
+    if args.eval:
+        data_collator_fn = partial(collate_fn_QA, image_token_id=image_token_id, model=model, processor=processor, extended=True, num_frames=30)  
+
+
+    elif (("BB" in args.mode) or ("optFlow" in args.mode)):
         withBlur = False
         withExtended = None
         num_frames  = None
@@ -524,23 +666,44 @@ def basic_distillation(args):
     else:
          data_collator_fn = partial(collate_fn, image_token_id=image_token_id, model=model, processor=processor)
 
-    trainer = Trainer(
-    model=model,
-    args=training_args,
-    data_collator= data_collator_fn,
-    train_dataset=dataset,
-    callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
-    )
+    compute_metrics_fn = partial(compute_custom_metrics,compute_result=True, tokenizer=processor)
+    
+    if args.eval:
+       trainer = CustomTrainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        eval_dataset=dataset,
+        compute_metrics = compute_metrics_fn,
+ 
+        )
+
+    else:
+    
+        trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator= data_collator_fn,
+        train_dataset=dataset,
+        callbacks=[LossLoggerCallback(f"./{args.save_dir}/logs/log.txt")] 
+        )
 
     
-    trainer.train(resume_from_checkpoint=True) #resume_from_checkpoint=True
+    trainer.train() #resume_from_checkpoint=True
 
 
 
 if __name__ == "__main__":
     args          = parse_args()
     config.get_config(args)
-    if ("BB" in args.mode) or ("optFlow" in args.mode):
+
+    if args.eval:
+        if args.eval == 'directions':
+            args.dataset_csv =  "dataset/tempcomp/filtered_data.csv"
+
+
+    elif ("BB" in args.mode) or ("optFlow" in args.mode):
         args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined_w_BB.csv'
     else:
         args.dataset_csv =  'dataset/got10k/teacher/train/uniform_blur/combined.csv' #f"dataset/got10k/teacher/train/{args.mode}/combined.csv" 

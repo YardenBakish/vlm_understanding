@@ -76,6 +76,8 @@ class CustomTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
     
+     
+     '''
      def prediction_step(
         self,
         model: nn.Module,
@@ -94,8 +96,14 @@ class CustomTrainer(Trainer):
          return (None, outputs["logits"], inputs["labels"])
 
      
+     
+     
+     
+     
      def get_eval_dataloader(self, eval_dataset):
-
+        
+        
+        #return super().get_eval_dataloader(eval_dataset)
         return super().get_eval_dataloader(eval_dataset.select(range(24)))
        
         return torch.utils.data.DataLoader(
@@ -105,7 +113,7 @@ class CustomTrainer(Trainer):
             shuffle=False
         )
      
-     
+     #{'eval_custom_loss': {'accuracy': 1.3333333333333333}, 'eval_runtime': 58.2372, 'eval_samples_per_second': 0.412, 'eval_steps_per_second': 0.052, 'epoch': 0.3073770491803279}
      
      def evaluate(self, eval_dataset=None, **kwargs):
 
@@ -114,6 +122,7 @@ class CustomTrainer(Trainer):
         print(self.state.global_step)
 
         print(outputs)
+        exit(1)
         return outputs
         exit(1)
         
@@ -142,7 +151,7 @@ class CustomTrainer(Trainer):
 
         # Add accuracy to metrics dict
         eval_output["accuracy"] = accuracy
-        return eval_output
+        return eval_output'''
 
 
 
@@ -170,7 +179,7 @@ class LossLoggerCallback2(TrainerCallback):
 
 
 
-
+'''
 class StreamingAccuracy:
     def __init__(self):
         self.reset()
@@ -213,6 +222,8 @@ def compute_custom_metrics(eval_pred: EvalPrediction,compute_result: bool, token
                 )
     explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
 
+    print("\n\n\n")
+    print(explainations)
 
     #print(explainations,flush = True)
 
@@ -222,20 +233,25 @@ def compute_custom_metrics(eval_pred: EvalPrediction,compute_result: bool, token
                     skip_special_tokens=True,
                 )
     explainations = [ex.split("Assistant: ")[-1] for ex in generated_texts]
+    
+    print("\n")
+    
+    print(explainations)
+
+    exit(1)
 
 
 
     #print(explainations,flush = True)
 
     value = random.choice([1, 2])
-    print(value)
+  
     streaming_acc.update(value)
 
     if compute_result:
         res = streaming_acc.compute()
         streaming_acc.reset()
-        print(res)
-
+    
         return {"custom_loss": res}
     else:
-        return {"custom_loss": None}
+        return {"custom_loss": None}'''

@@ -14,5 +14,8 @@ PATHS = {
 #/home/ai_center/ai_users/yardenbakish/datasets/abhimanyukarshni/got10k/versions/1
 
 
+
+
+
 def get_config(args):
     args.paths = PATHS

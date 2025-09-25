@@ -366,7 +366,7 @@ def create_tracks(args):
     pattern = re.compile(r'.*_(\d+)$')
 
     dataset_dir = args.paths['dataset_dir']     #      args.paths['dataset_dir']               
-    output_dir  =  "dataset/GOT10KVAL_teacher"              #  # args.output_dir "dataset/GOT10KVAL_teacher" 
+    output_dir  =  args.output_dir # "dataset/GOT10KVAL_teacher"  
 
     with open(FILTERED_DATASET, 'r') as file:
         subdirs = file.readlines()
@@ -391,7 +391,7 @@ def create_tracks(args):
         if os.path.exists(f"{output_dir}/{dir}/video_original.mp4") == False:
             continue
 
-        output_rep_dir = f"{output_dir}/{dir}/{pref_dir}_{output_dir_ext}"
+        output_rep_dir = f"{output_dir}/{dir}/{pref_dir}_32_{output_dir_ext}"
 
         if args.cuts:
              if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
@@ -413,12 +413,75 @@ def create_tracks(args):
        
         generate_track_reps(video_path, output_rep_dir,cuts = args.cuts, is_random=False)
         
+        
        
         
         #generate_movement_reps(args, sample_dir, output_rep_dir,step)
 
 
 
+
+
+
+
+
+def create_tracks_csv(args):
+
+
+    csv_path  = "dataset/tempcomp/all_data_yes_no.csv"
+    #iterate whatever folders you want, send the correct sample
+
+    pattern = re.compile(r'.*_(\d+)$')
+
+    dataset_dir = "dataset/tempcomp/videos"              
+    output_dir  =  "dataset/tempcomp/videos"  
+
+    df = pd.read_csv(csv_path) 
+    video_paths = df["video_path"].tolist()
+    sorted_subdirs = [elem.split(".")[0] for elem in video_paths]
+    sorted_subdirs = [elem.split("/")[-1] for elem in sorted_subdirs]
+
+
+    num_subdirs_per_partition = int(len(sorted_subdirs) // PARTITIONS)
+    paritioned_subdirs = sorted_subdirs[args.partition * num_subdirs_per_partition : (args.partition+1)*num_subdirs_per_partition]
+    
+
+
+    pref_dir = "tracks_cuts" if args.cuts  else "tracks"
+    
+    
+    output_dir_ext = "grid"
+    for dir in paritioned_subdirs:
+
+      
+        output_rep_dir = f"{output_dir}/{dir}/{pref_dir}_{output_dir_ext}"
+
+        if args.cuts:
+             if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
+                continue
+
+
+        
+
+        video_path = f"{output_dir}/{dir}.mp4"
+
+        if os.path.exists(f"{output_rep_dir}/pred_tracks.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility.pt"):
+            continue
+        if os.path.exists(f"{output_rep_dir}/pred_tracks_online.pt") and os.path.exists(f"{output_rep_dir}/pred_visibility_online.pt"):
+            continue
+       
+        os.makedirs(output_rep_dir, exist_ok=True)
+
+      
+       
+        generate_track_reps(video_path, output_rep_dir,cuts = args.cuts, is_random=False)
+
+       
+        
+        
+       
+        
+        #generate_movement_reps(args, sample_dir, output_rep_dir,step)
 
 
 
@@ -449,7 +512,7 @@ if __name__ == "__main__":
         create_movement_reps(args)   
     elif args.mode == "create_tracks":
         print("MADE IT")
-        create_tracks(args)   
+        create_tracks_csv(args)   
 
     elif args.mode == "check_for_missing":
         check_for_missing(args)

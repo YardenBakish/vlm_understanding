@@ -8,8 +8,9 @@ from moviepy.editor import *
 import ast
 import pandas as pd
 from conditioned_models.FlowFormerPlusPlus.visualize_flow import extract_images,visualize_flow,build_model
-from conditioned_models.cotracker.generate_track import generate_track, generate_mov_from_track, generate_track_cuts
+from conditioned_models.cotracker.generate_track import generate_track, generate_mov_from_track, generate_track_cuts, generate_track_cuts_32
 from conditioned_models.cotracker.generate_track_online import generate_track_online
+import json
 
 
 from modules.FlowFormer.cfg import get_cfg
@@ -425,12 +426,12 @@ def generate_track_mov_reps(input_path, output_dir, is_random=False):
 
 
 
-def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, target_H,modified=False):
+def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, target_H,modified=False, foc = False,foc_hard = False, internVL = False):
 
     if modified:
         tracks_path = videoPath.split("/")[:-1]
         tracks_path = "/".join(tracks_path)
-        tracks_path = f"{tracks_path}/tracks_cuts_grid"
+        tracks_path = f"{tracks_path}/tracks_cuts_32_grid" if internVL  else f"{tracks_path}/tracks_cuts_grid"
         diff_tracks     = torch.load(f"{tracks_path}/pred_tracks.pt")
         pred_visibility    = torch.load(f"{tracks_path}/pred_visibility.pt")
 
@@ -440,13 +441,50 @@ def collect_difference_vectors(video, videoPath, bboxes, indices, target_W, targ
         outer_means = []
         inner_masks = []
 
-        grid_size = 27
-        patch_h = 384 // grid_size
-        patch_w = 384 // grid_size
-        y_centers = np.arange(patch_h//2, 384, patch_h)
-        x_centers = np.arange(patch_w//2, 384, patch_w)
+        grid_size = 32 if internVL else 27
+
+        res_selected = 448 if internVL else 384
+        patch_h = res_selected // grid_size
+        patch_w = res_selected // grid_size
+        y_centers = np.arange(patch_h//2, res_selected, patch_h)
+        x_centers = np.arange(patch_w//2, res_selected, patch_w)
         grid_y, grid_x = np.meshgrid(y_centers, x_centers, indexing="ij")
         patch_centers = np.stack([grid_x.ravel(), grid_y.ravel()], axis=-1)  # shape [729, 2]
+
+      
+        if foc:
+            patch_centers_grid = patch_centers.reshape(grid_size, grid_size, 2)
+            all_vectors = []
+            for t in range(diff_tracks.shape[0]):
+                x1_t, y1_t, x2_t, y2_t = bboxes[t]
+                inner_mask = (
+                (patch_centers[:, 0] >= x1_t) & (patch_centers[:, 0] <= x2_t) &
+                (patch_centers[:, 1] >= y1_t) & (patch_centers[:, 1] <= y2_t)
+                )
+
+                inner_masks.append(torch.from_numpy(inner_mask))
+
+
+                bbox_center = patch_centers[inner_mask].mean(axis=0)
+                diffs = bbox_center[None, :] - patch_centers   # (729,2)
+                dists = np.linalg.norm(diffs, axis=1)
+                # normalize distances → [0, max_val]
+                
+                if foc_hard == False:
+                    if dists.max() > 0:
+                        scale = 32 / dists.max()
+                        diffs = diffs * scale
+                    else:
+                        diffs = np.zeros_like(diffs)
+                diffs[inner_mask] = 0
+                all_vectors.append(diffs)
+            
+            inner_masks = torch.stack(inner_masks, dim=0)
+            diff_tracks =torch.tensor(np.stack(all_vectors, axis=0), dtype=torch.float32) 
+
+            
+            return inner_means, outer_means, diff_tracks, pred_visibility, inner_masks
+
         
 
         for t in range(diff_tracks.shape[0]):
@@ -1062,3 +1100,25 @@ for t in range(diff_tracks.shape[0]):
         exit(1)
 
 """
+
+
+
+def load_json(filename):
+    """Load JSON file as a dictionary."""
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_json(filename, data):
+    """Save dictionary to JSON file."""
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def update_json(filename, new_dict):
+    """Update or add a key-value pair to the JSON file."""
+    data = load_json(filename)
+    data.update(new_dict)
+    #print(data)
+    save_json(filename, data)

@@ -95,7 +95,6 @@ class PositionEmbeddingSine(nn.Module):
 
         pos = pos.view(pos.shape[0],pos.shape[1]*pos.shape[2],pos.shape[3] )
 
-        print(pos.shape)
         return pos
 
 
@@ -106,11 +105,18 @@ class PositionEmbeddingSine(nn.Module):
 
 
 def feature_add_position(feature0, feature1):
-    pos_enc = PositionEmbeddingSine(num_pos_feats=1152 // 2)
-    position = pos_enc(feature0)
+    pos_enc = PositionEmbeddingSine(num_pos_feats=feature0.shape[-1] // 2)
+    if feature0.shape[-2] == 1025:
+        position = pos_enc(feature0[:,1:,:])
+        cls_token = torch.zeros(position.shape[0], 1, position.shape[2], device = position.device)
+        position = torch.cat([cls_token, position], dim=1)
 
-    feature0 = feature0 + position
-    feature1 = feature1 + position
+        feature0 = feature0 + position
+        feature1 = feature1 + position
+    else:
+        position = pos_enc(feature0)
+        feature0 = feature0 + position
+        feature1 = feature1 + position
 
     return feature0, feature1
 
@@ -138,6 +144,7 @@ class MovementCrossAttn(nn.Module):
 
     def forward(self, hidden_t, hidden_n,B,T,H,D):
         feature0, feature1 = feature_add_position(hidden_t, hidden_n)
+        
         res = self.transformer(feature0, feature1,feature1)[0]
         res = res.view(B, T-1, H, D)
 

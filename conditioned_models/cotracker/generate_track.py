@@ -252,6 +252,7 @@ def generate_track(video_path, output_dir, is_random=False):
 
 
 def generate_track_cuts(video_path, output_dir, is_random=False):
+    
     grid_size = 27
     grid_query_frame = 0
     #video_path = "conditioned_models/cotracker/assets/movie1.mp4"
@@ -277,6 +278,9 @@ def generate_track_cuts(video_path, output_dir, is_random=False):
 
     model = model.to(DEFAULT_DEVICE)
     video = video.to(DEFAULT_DEVICE)
+
+    if video.shape[1] < 30:
+        return
 
     indices = np.linspace(0, video.shape[1]-1, 30, dtype=int)
 
@@ -338,6 +342,86 @@ def generate_track_cuts(video_path, output_dir, is_random=False):
         query_frame=0 if is_random else grid_query_frame,
     )
     '''
+
+
+
+
+
+
+
+
+
+def generate_track_cuts_32(video_path, output_dir, is_random=False):
+    grid_size = 32
+    grid_query_frame = 0
+ 
+    #video_path = "conditioned_models/cotracker/assets/movie1.mp4"
+    #print(is_random)
+    #print(video_path)
+
+    # load the input video frame by frame
+    video = read_video_from_path(video_path)
+    video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
+
+    B, T, C, H, W = video.shape
+    video_reshaped = video.view(B * T, C, H, W)
+
+    # Resize
+    video_resized = F.interpolate(video_reshaped, size=(448, 448), mode='bilinear', align_corners=False)
+
+    # Reshape back to original [B, T, C, H, W] format
+    video = video_resized.view(B, T, C, 448, 448)
+
+
+  
+    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline")
+
+    model = model.to(DEFAULT_DEVICE)
+    video = video.to(DEFAULT_DEVICE)
+
+    indices = np.linspace(0, video.shape[1]-1, 30, dtype=int)
+
+    all_diffs = []
+    all_vis = []
+
+
+   
+    if is_random:
+        points = generate_points(T, 512, 512,  n_points=576).cuda()
+        if torch.cuda.is_available():
+            queries = points.cuda()
+        pred_tracks, pred_visibility = model(
+        video,
+        queries = queries[None],
+        backward_tracking=True,
+    )
+    else:
+
+        for i in range(len(indices)-1):
+            start = indices[i].item()
+            end = indices[i+1].item()
+            pred_tracks, pred_visibility = model(
+                video[:,start:end+1],
+                grid_size=grid_size,
+                grid_query_frame=grid_query_frame,
+            )
+            pred_visibility = pred_visibility[:,-1].squeeze(0)
+           
+            diff = pred_tracks[:, -1] - pred_tracks[:, 0]   # shape [1, 729, 2]
+            diff = diff.squeeze(0)
+            all_diffs.append(diff)
+            all_vis.append(pred_visibility)
+
+        
+    pred_tracks_diff = torch.stack(all_diffs, dim=0) 
+    pred_visibility = torch.stack(all_vis, dim=0) 
+
+    
+    torch.save(pred_tracks_diff,     f"{output_dir}/pred_tracks.pt")
+    torch.save(pred_visibility,     f"{output_dir}/pred_visibility.pt")
+
+   
+
 
 
 

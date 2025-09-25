@@ -22,6 +22,7 @@ from convert_utils import flow_to_image
 from modules.gmflow.gmflow.gmflow import GMFlow
 from modules.tracktention import TracktentionLayer, MovementVectorPredictor, LatentRegulaizer
 import json
+from modules.movement_cross_attn import MovementCrossAttn , global_correlation_softmax
 
 
 
@@ -565,6 +566,8 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         return_dict: Optional[bool] = None,
         pred_tracks: Optional[torch.FloatTensor] = None,
         pred_visibility: Optional[torch.BoolTensor] = None,
+        video_id : Optional[str] = None,
+
     ) -> Union[Tuple, BaseModelOutput]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -648,29 +651,97 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
                 optical_maps_pred.append(flow)
 
 
-
-            #import numpy as np
-            #l2 = torch.sum(last_hidden_state[18], dim=1)  # [729]
-            ## Reshape to 27x27
-            #heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
-            ## Upsample to 128x128
-            #heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
-            #heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
-            ## Normalize to 0-255 and convert to uint8
-            #heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
-            #heatmap_uint8 = heatmap_norm.astype(np.uint8)
-            ## Apply colormap
-            #heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-            ## Save the image
-            #cv2.imwrite(f'to_del/b.png', heatmap_color)
-            ##print("REACHED")
-            #exit(1)
+        
+        import numpy as np
+        #for i in range(last_hidden_state.shape[0]):
+        #    l2 = torch.linalg.vector_norm(last_hidden_state[i], dim=-1)  # [729]
+        #    # Reshape to 27x27
+        #    heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
+        #    # Upsample to 128x128
+        #    heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
+        #    heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
+        #    # Normalize to 0-255 and convert to uint8
+        #    heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
+        #    heatmap_uint8 = heatmap_norm.astype(np.uint8)
+        #    # Apply colormap
+        #    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        #    # Save the image
+        #    cv2.imwrite(f'to_del/c_{i}.png', heatmap_color)
+        #    #print("REACHED")
+        #exit(1)
         
 
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
+        #print(last_hidden_state.shape)
+        #exit(1)
+
+        
+        T = 30
+        B = hidden_states.shape[0] // T
+        H, D = hidden_states.shape[1:]  # 729, 1152 
+        hidden_states_reshape = last_hidden_state.view(B,T,H,D)
+        f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
+        f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
+        f_t        = f_t.reshape(B*(T-1),H,D)
+        f_next     = f_next.reshape(B*(T-1),H,D)
+
+    
+
+        flow, _ = global_correlation_softmax(f_t, f_t)
+        flow = flow.permute(0,2,3,1).view(B*(T-1),H,2)
+        #torch.save(flow, f"check_res3/flow_{video_id}.pt")
+
+    
+      
+        
+        magnitudes = np.linalg.norm(flow.detach().cpu().numpy(), axis=-1)
 
 
+        print(magnitudes.max())
+        print(magnitudes.min())
+
+        
+        import matplotlib.pyplot as plt
+        print(flow.shape)
+        print(pixel_values_copy.shape)
+        grid_size = 27
+        patch_h = 384 // grid_size
+        patch_w = 384 // grid_size
+        y_centers = np.arange(patch_h//2, 384, patch_h)
+        x_centers = np.arange(patch_w//2, 384, patch_w)
+        grid_y, grid_x = np.meshgrid(y_centers, x_centers, indexing="ij")
+        centers = np.stack([grid_x.ravel(), grid_y.ravel()], axis=-1)  # shape [729, 2]
+
+        for i in range(29):
+            x = pixel_values_copy[0]
+            x = x[i,:,:,:]
+
+            x = x.permute(1, 2, 0)
+            x = x.cpu().float().numpy()
+            x = (x - x.min()) / (x.max() - x.min())
+            x = np.float32(x)
+            x =  np.uint8(255 * x)
+            x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
+            x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+            
+            displacements = flow[i].detach().cpu().numpy()
+            magnitudes = np.linalg.norm(displacements, axis=1)
+
+            plt.figure(figsize=(6, 6))
+            plt.imshow(x)
+            plt.quiver(
+                centers[:, 0], centers[:, 1],   # X, Y start points
+                displacements[:, 0], displacements[:, 1],  # U, V (dx, dy)
+                magnitudes,  # color by magnitude
+                angles="xy", scale_units="xy", scale=1.5, cmap="turbo", width=0.003
+            )
+            plt.axis("off")
+            plt.tight_layout()
+            plt.savefig(f"to_del3/frame_{i:03d}Y.png", dpi=150)
+            plt.close()
+        exit(1)
+        
         if not return_dict:
             return (last_hidden_state,) + encoder_outputs[1:]
 
@@ -1002,10 +1073,11 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
 
 
         merged_embeds = torch.where(image_mask.unsqueeze(-1), image_embeds, inputs_embeds)
+        
 
         return merged_embeds
 
-    def get_image_features(self, pixel_values: torch.FloatTensor, pixel_attention_mask: torch.LongTensor = None,  pred_tracks:torch.LongTensor = None, pred_visibility:torch.BoolTensor= None):
+    def get_image_features(self, pixel_values: torch.FloatTensor,   pixel_attention_mask: torch.LongTensor = None,  pred_tracks:torch.LongTensor = None, pred_visibility:torch.BoolTensor= None, video_id : Optional[str] = None,):
         """
         Encodes images into continuous embeddings that can be forwarded to the language model.
 
@@ -1015,6 +1087,8 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
             pixel_attention_mask (`torch.LongTensor`, *optional*):
                 The attention mask indicating padded regions in the image.
         """
+
+      
         optical_maps_pred = None
         batch_size, num_images, num_channels, height, width = pixel_values.shape
         #pixel_values_copy = pixel_values.clone()
@@ -1050,7 +1124,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
         # Get sequence from the vision encoder
-        image_hidden_states, optical_maps_pred = self.vision_model(pixel_values=pixel_values,pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask, pred_tracks= pred_tracks, pred_visibility= pred_visibility)
+        image_hidden_states, optical_maps_pred = self.vision_model(pixel_values=pixel_values,pixel_values_copy=pixel_values_copy, patch_attention_mask=patch_attention_mask, pred_tracks= pred_tracks, pred_visibility= pred_visibility, video_id = video_id)
 
 
       
@@ -1078,14 +1152,16 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-
+        video_id : Optional[str] = None,
         pred_tracks : Optional[torch.LongTensor] = None,
         pred_visibility : Optional[torch.BoolTensor] = None,
 
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, SmolVLMBaseModelOutputWithPast]:
-        
+
+
+    
         optical_maps_pred = None
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1124,7 +1200,7 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         if pixel_values is not None and image_hidden_states is not None:
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
         elif pixel_values is not None:
-            image_hidden_states, optical_maps_pred = self.get_image_features(pixel_values, pixel_attention_mask, pred_tracks, pred_visibility)
+            image_hidden_states, optical_maps_pred = self.get_image_features(pixel_values, pixel_attention_mask, pred_tracks, pred_visibility, video_id)
         elif image_hidden_states is not None:
             image_hidden_states = image_hidden_states.to(dtype=self.dtype, device=input_ids.device)
 
@@ -1290,6 +1366,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
+        video_id: Optional[str] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         optical_flow_maps: Optional[torch.FloatTensor] = None,
         
@@ -1343,6 +1420,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             return_dict=True,
+            video_id = video_id,
             pred_tracks = pred_tracks,
             pred_visibility = pred_visibility,
 
