@@ -3,6 +3,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+import re
+import matplotlib.pyplot as plt
 
 class TMLDataset(Dataset):
     def __init__(self, part, fpath='dataset-full.npz', transform=None):
@@ -150,3 +152,268 @@ def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
     Q = torch.cat(Q)
 
     return X,Y,Q
+
+
+
+
+################################################
+#VISUALIZATION
+###############################################
+
+
+def visualize(file_path):
+    per_layer = True if "sparse" in file_path else False
+    # Storage
+    layers = []
+    accs = []
+    pgd_srs = []
+    nes_values = [[] for _ in range(4)]  # 4 NES configs
+    
+    with open(file_path, "r") as f:
+        lines = [l.strip() for l in f if l.strip()]  # clean + skip empty lines
+
+    # Process in chunks of 2 lines (first line = acc/pgd, second line = NES values)
+    for i in range(0, len(lines), 2):
+       
+        if i == 0 and per_layer:
+            continue
+
+        line1 = lines[i]
+        line2 = lines[i+1] if i+1 < len(lines) else ""
+
+        # Match layer + acc + pgd_sr
+        #match = re.match(r"(\w+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)", line1)
+        
+        pattern = r"([\w.\-]+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)"
+        #pattern = r"([\w\-]+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)"
+        match = re.match(pattern, line1)
+        
+        if not match:
+            continue
+
+        layer, acc, pgd = match.groups()
+        
+        ####
+        if per_layer == False:
+            tmp = layer.split("_")[0]
+            layer = tmp
+        #exit(1)
+        
+        ####
+        
+        
+        layer = layer.replace("_sparse", "")  # strip suffix
+        if per_layer:
+            layer = layer.split("_")[-1]
+       
+        layers.append(layer)
+        accs.append(float(acc))
+        pgd_srs.append(float(pgd))
+
+        # Extract NES values from second line
+        nes_matches = re.findall(r"nes_sr=([\d.]+),queries=\d+", line2)
+        for j, val in enumerate(nes_matches):
+            nes_values[j].append(float(val))
+
+
+    if per_layer:
+        plt.figure(figsize=(8, 5))
+        #print(layers)
+        #print(pgd_srs)
+        #exit(1)
+        plt.plot(layers, accs, marker="o", label="Bengin Accuracy")
+        plt.plot(layers, pgd_srs, marker="o", label="PGD Success Rate")
+   
+        #plt.grid(True)
+        #plt.tight_layout()
+        #plt.savefig("layer_acc_pgd.png", dpi=300)
+        #plt.close()
+    
+        # -------- Plot 2: NES curves --------
+        nes_labels = [
+            "momentum=0",
+            #"NES (momentum=0, targeted=True)",
+            "momentum=0.9",
+            #"NES (momentum=0.9, targeted=True)"
+        ]
+    
+        nes_values = [nes_values[0], nes_values[2]]
+        #nes_labels=nes_labels[0,2]
+    
+        for j, nes_curve in enumerate(nes_values):
+            plt.plot(layers, nes_curve, marker="o", label=nes_labels[j])
+        plt.xlabel("Regularization Strengh")
+        tag = file_path.split("_")[-2]
+
+        plt.title("Adversarial Attack Success Rates and Accuracy - L1 Regularization - FC3 Layer")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(f"complete_graph_{tag}.png", dpi=300)
+        plt.close()
+
+    else:
+
+        # -------- Plot 1: Accuracy vs PGD_SR --------
+        plt.figure(figsize=(8, 5))
+        #print(layers)
+        #print(pgd_srs)
+        #exit(1)
+        plt.plot(layers, accs, marker="o", label="Bengin Accuracy")
+        plt.plot(layers, pgd_srs, marker="o", label="PGD Success Rate")
+        plt.xlabel("Layer")
+        plt.title("PGD-Success Rate and Accuracy - Dropout Regularization")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("layer_acc_pgd.png", dpi=300)
+        plt.close()
+
+        # -------- Plot 2: NES curves --------
+        nes_labels = [
+            "momentum=0",
+            #"NES (momentum=0, targeted=True)",
+            "momentum=0.9",
+            #"NES (momentum=0.9, targeted=True)"
+        ]
+
+        plt.figure(figsize=(8, 5))
+        nes_values = [nes_values[0], nes_values[2]]
+        #nes_labels=nes_labels[0,2]
+
+        for j, nes_curve in enumerate(nes_values):
+            plt.plot(layers, nes_curve, marker="o", label=nes_labels[j])
+        plt.xlabel("Layer")
+        plt.title("NES-Success Rate - Dropout Regularization")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("layer_nes.png", dpi=300)
+        plt.close()
+
+
+
+
+def parse_file(file_path):
+    variants = []
+    queries_m0 = []
+    queries_m1 = []
+
+    with open(file_path, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    # process in pairs of lines
+    for i in range(0, len(lines), 2):
+        variant_line = lines[i]
+        results_line = lines[i+1]
+
+        # variant name
+        variant = variant_line.split("|")[0].strip()
+        variant = variant.replace("_sparse", "")
+
+        #if file_path.endswith("eval_results.txt"):  # ensure only first parse sets names
+        variants.append(variant)
+
+        # extract queries
+        q_vals = re.findall(r"queries=(\d+)", results_line)
+        q_vals = list(map(int, q_vals))
+
+        if len(q_vals) >= 3:
+            queries_m0.append(q_vals[0])   # 1st
+            queries_m1.append(q_vals[2])   # 3rd
+        else:
+            queries_m0.append(None)
+            queries_m1.append(None)
+
+    return variants, queries_m0, queries_m1
+
+
+def visualize_queries_dual(file1, file2, label1="L1", label2="Dropout"):
+    variants1, m0_f1, m1_f1 = parse_file(file1)
+    variants2, m0_f2, m1_f2 = parse_file(file2)
+
+    assert variants1 == variants2, "Variants mismatch between files!"
+    variants = variants1
+
+    x = np.arange(len(variants))
+    width = 0.2  # bar width
+
+    plt.figure(figsize=(10,6))
+
+    # File 1 bars
+
+    #exit(1)
+    plt.bar(x - width*1.5, m0_f1, width, label=f"{label1} (Momentum=0)")
+    plt.bar(x - width*0.5, m1_f1, width, label=f"{label1} (Momentum=0.9)")
+
+    # File 2 bars
+    plt.bar(x + width*0.5, m0_f2, width, label=f"{label2} (Momentum=0)")
+    plt.bar(x + width*1.5, m1_f2, width, label=f"{label2} (Momentum=0.9)")
+
+    plt.xticks(x, variants, rotation=30, ha="right")
+    plt.ylabel("Queries")
+    plt.title("NES - Queries per Variant (Comparison)")
+    plt.legend(ncol=2, loc="upper center")
+    plt.grid(True, linestyle="--", alpha=0.6, axis="y")
+
+    ylim = plt.ylim()
+    plt.ylim(ylim[0], ylim[1] * 1.35)
+    plt.tight_layout()
+
+    plt.savefig("queries_vis_dual.png", dpi=300)
+    plt.show()
+
+
+'''
+def visualize_queries():
+    file_path = "eval_results.txt"   # replace with your file
+
+    variants = []
+    queries_m0 = []   # momentum = 0  (1st queries entry)
+    queries_m1 = []   # momentum > 0 (3rd queries entry)
+
+    with open(file_path, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    # process in pairs of lines
+    for i in range(0, len(lines), 2):
+        variant_line = lines[i]
+        results_line = lines[i+1]
+
+        # variant name = first token before '|'
+        variant = variant_line.split("|")[0].strip()
+        variant= variant.replace("_sparse", "")
+        variants.append(variant)
+
+        # extract all queries numbers
+        q_vals = re.findall(r"queries=(\d+)", results_line)
+        q_vals = list(map(int, q_vals))
+
+        if len(q_vals) >= 3:
+            queries_m0.append(q_vals[0])   # 1st
+            queries_m1.append(q_vals[2])   # 3rd
+        else:
+            queries_m0.append(None)
+            queries_m1.append(None)
+
+    # ---- Plotting ----
+    x = range(len(variants))
+    x = np.arange(len(variants))
+    width = 0.35  # bar width
+    plt.figure(figsize=(8,5))
+    
+    plt.bar(x - width/2, queries_m0, width, label="Momentum = 0")
+    plt.bar(x + width/2, queries_m1, width, label="Momentum = 0.9")
+
+    plt.xticks(x, variants, rotation=30, ha="right")
+    plt.ylabel("Queries")
+    plt.title("NES - Queries per variant")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6, axis="y")
+
+    ylim = plt.ylim()
+    plt.ylim(ylim[0], ylim[1] * 1.35)
+    plt.tight_layout()
+
+    plt.savefig("queries_vis.png", dpi=300)
+'''

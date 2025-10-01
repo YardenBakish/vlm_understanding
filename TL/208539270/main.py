@@ -20,6 +20,12 @@ import torchvision.transforms as transforms
 import glob
 import os
 
+
+L1_REG_STRENGH = [1e-5, 2e-4, 1e-2, 0.1, 1.0,10.0]
+DROPOUT_REG_STRENGH = [0.1, 0.2, 0.3, 0.4,0.5,0.6]
+
+
+
 def find_files_with_prefix(directory, prefix):
     pattern = os.path.join(directory, prefix + "*")
     return [f for f in glob.glob(pattern) if os.path.isfile(f)]
@@ -33,8 +39,16 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train', type=int, help='1 for adversarial training, 0 for evaluating')
-    return parser.parse_args()
+    parser.add_argument('--mode', choices = ["train", "eval", "vis"])
+    parser.add_argument('--l1', action='store_true')
+    parser.add_argument('--dropout', action='store_true')
+    parser.add_argument('--per_layer', action='store_true')
+    parser.add_argument('--layers', nargs="+", default=["None", "conv1", "conv2","conv3", "conv4", "fc1", "fc2", "fc3"])
+    parser.add_argument('--vis_text')
+
+    args = parser.parse_args()
+    return args
+
 
 def run_standard_training(reg_layer=None, reg_strength=1e-4, dropout = False):
     # load training set
@@ -47,22 +61,24 @@ def run_standard_training(reg_layer=None, reg_strength=1e-4, dropout = False):
     data_tr = utils.TMLDataset('train', transform=transforms_tr)
 
     # init model
-    model = models.SimpleCNN(reg_layer=reg_layer, dropout=dropout)
+    model = models.SimpleCNN(reg_layer=reg_layer, dropout=dropout, reg_strength=reg_strength)
     model.to(device)
 
     # loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+    print(dropout)
+    exit(1)
 
     # execute training
     model = utils.standard_train(model, data_tr, criterion, optimizer,
                                  scheduler, device,
-                                 reg_strength=(reg_strength if reg_layer else 0.0))
+                                 reg_strength=(reg_strength if (reg_layer and dropout == False) else 0.0))
 
     # save model
     model.to('cpu')
-    tag = "standard" if reg_layer is None else f"{reg_layer}_sparse"
+    tag = "standard" if reg_layer=="None" else f"{reg_layer}_sparse"
     tag = tag if dropout == False else f"{tag}_dropout"
     tag = tag if reg_strength==1e-4 else f"{tag}_{reg_strength}"
     torch.save(model.state_dict(), f"trained-models/simple-cnn-{tag}")
@@ -93,6 +109,8 @@ def adjust_paths(mpaths,dropout=False, comp_single=False):
         output_file = f"eval_results_{variant}.txt"
         
     return output_file, new_d 
+
+
 
 def run_evaluation(dropout=False, comp_single=False):
     # Load all trained models (skip any that aren't present)
@@ -167,106 +185,43 @@ def run_evaluation(dropout=False, comp_single=False):
     print(f"Saved evaluation to {output_file}")
 
 
-def visualize(file_path):
-    # Storage
-    layers = []
-    accs = []
-    pgd_srs = []
-    nes_values = [[] for _ in range(4)]  # 4 NES configs
-    
-    with open(file_path, "r") as f:
-        lines = [l.strip() for l in f if l.strip()]  # clean + skip empty lines
 
-    # Process in chunks of 2 lines (first line = acc/pgd, second line = NES values)
-    for i in range(0, len(lines), 2):
-       
-        if i == 0:
-            continue
-
-        line1 = lines[i]
-        line2 = lines[i+1] if i+1 < len(lines) else ""
-
-        # Match layer + acc + pgd_sr
-        #match = re.match(r"(\w+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)", line1)
         
-        pattern = r"([\w.\-]+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)"
-        #pattern = r"([\w\-]+)\s*\|\s*acc=([\d.]+)\s*\|\s*pgd_sr=([\d.]+)"
-        match = re.match(pattern, line1)
-        
-        if not match:
-            continue
-
-        layer, acc, pgd = match.groups()
-        
-        ####
-        print(layer)
-        tmp = layer.split("_")[-1]
-        layer = tmp
-        
-        ####
-        
-        
-        layer = layer.replace("_sparse", "")  # strip suffix
-        layers.append(layer)
-        accs.append(float(acc))
-        pgd_srs.append(float(pgd))
-
-        # Extract NES values from second line
-        nes_matches = re.findall(r"nes_sr=([\d.]+),queries=\d+", line2)
-        for j, val in enumerate(nes_matches):
-            nes_values[j].append(float(val))
-
-    # -------- Plot 1: Accuracy vs PGD_SR --------
-    plt.figure(figsize=(8, 5))
-    #plt.plot(layers, accs, marker="o", label="Accuracy")
-    plt.plot(layers, pgd_srs, marker="o", label="PGD Success Rate")
-    plt.xlabel("Regularization Strength")
-    plt.title("PGD-Success Rate - Conv4 Layer - L1 Regularization")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("layer_acc_pgd.png", dpi=300)
-    plt.close()
-
-    # -------- Plot 2: NES curves --------
-    nes_labels = [
-        "momentum=0",
-        #"NES (momentum=0, targeted=True)",
-        "momentum=0.9",
-        #"NES (momentum=0.9, targeted=True)"
-    ]
-
-    plt.figure(figsize=(8, 5))
-    nes_values = [nes_values[0], nes_values[2]]
-    #nes_labels=nes_labels[0,2]
-
-    for j, nes_curve in enumerate(nes_values):
-        plt.plot(layers, nes_curve, marker="o", label=nes_labels[j])
-    plt.xlabel("Regularization Strength")
-    plt.title("NES-Success Rate - Conv4 Layer - L1 Regularization")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("layer_nes.png", dpi=300)
-    plt.close()
-
-
 
 
 if __name__=='__main__':
 
     args = parse_arguments()
 
-    if args.train == 1:
-        #variants = ["fc1", "conv3", "conv1", "conv2",  "conv4", "fc2", "fc3", "conv3",  None] #,  
+    if args.mode == "train":
+        #variants = ["conv3", "conv1", "conv2",  "conv4", "fc1", "fc2", "fc3", "conv3",  None] #,  
+
+        for reg_layer in args.layers:
+            if args.per_layer:
+                print(args.l1)
+                exit(1)
+                if args.l1 is None and args.dropout is None:
+                    print("When choosing 'per_layer', you must specify --l1 or --dropout")
+                    exit(1)
+                else:
+                    reg_values = L1_REG_STRENGH if args.l1 else DROPOUT_REG_STRENGH
+                    for reg_strength in reg_values:
+                        tag = run_standard_training(reg_layer=reg_layer,reg_strength=reg_strength)
+            else:
+                tag = run_standard_training(reg_layer=reg_layer,dropout = args.dropout)
+                #tag = run_standard_training(reg_layer=reg_layer)  # uses default reg_strength
+                #tag = run_standard_training(reg_layer=reg_layer, dropout=True)  # uses default reg_strength
+            print(f"Finished training variant: {tag}")
+
+
         #for reg_layer in variants:
         #    #tag = run_standard_training(reg_layer=reg_layer)  # uses default reg_strength
         #    tag = run_standard_training(reg_layer=reg_layer, dropout=True)  # uses default reg_strength
         
-        variants = ["fc3"] #,  f
-        for reg_layer in variants:
-            for reg_strength in [1e-5, 2e-4, 1e-2, 0.1, 1.0,10.0]:
-                tag = run_standard_training(reg_layer=reg_layer,reg_strength=reg_strength)  # uses default reg_strength
+        #variants = ["fc3"] #,  f
+        #for reg_layer in variants:
+        #    for reg_strength in [1e-5, 2e-4, 1e-2, 0.1, 1.0,10.0]:
+        #        tag = run_standard_training(reg_layer=reg_layer,reg_strength=reg_strength)  # uses default reg_strength
 
 
         #run_evaluation()
@@ -274,10 +229,14 @@ if __name__=='__main__':
         run_evaluation(comp_single='fc3_sparse')
         #run_evaluation(comp_single='conv4_sparse')
         print(f"Finished training variant: {tag}")
-    elif args.train == 0:
+    elif args.mode == "eval":
        run_evaluation(comp_single='fc1_sparse')
     else:
         #plot_sparsification_results("eval_results.txt")
-        #visualize("eval_results_dropout.txt")
-        visualize("eval_results_conv4_sparse.txt")
+        #utils.visualize("eval_results_dropout.txt")
+        utils.visualize(args.vis_text)
+
+        #utils.visualize_queries()
+        #utils.visualize_queries_dual("eval_results.txt","eval_results_dropout.txt")
+        #utils.visualize("eval_results_conv4_sparse.txt")
 
