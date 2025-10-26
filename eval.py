@@ -32,7 +32,11 @@ from processing_smolvlm import SmolVLMProcessor
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 #from internvl.processing_internvl import InternVLProcessor
+torch.backends.cudnn.enabled = False
 
+#s = 32
+#dev = torch.device('cuda')
+#torch.nn.functional.conv2d(torch.zeros(s, s, s, s, device=dev), torch.zeros(s, s, s, s, device=dev))  
 
 import config
 import argparse
@@ -56,11 +60,11 @@ SAMPLES_TO_TEST = [
 #"GOT-10k_Val_000001",
 #"GOT-10k_Val_000095",
 
-"GOT-10k_Val_000053",
+#"GOT-10k_Val_000053",
 
 
 
-#"GOT-10k_Val_000030",
+"GOT-10k_Val_000018",
 #"GOT-10k_Val_000029",
 
 
@@ -94,8 +98,8 @@ SAMPLES_TO_TEST = [
 SAMPLES_EMOTIONS_TO_TEST =[
     #"vid1",
     #"vid2",
-    "vid3",
-    #"vid4",
+    #"vid3",
+    "vid4",
     #"vid5",
 ]
 
@@ -704,7 +708,7 @@ def configure_options(args, model_type):
 
 
 def vis(args):
-    model_types           = ["orig" ,"finetuned"  ,            ]
+    model_types           = ["finetuned"  , "orig" ,           ]
     if "internVL" not in args.model_size:
         processor_path        = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct" if "500M" in args.model_size  else "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     else:
@@ -775,8 +779,10 @@ def vis(args):
             processor = SmolVLMProcessor.from_pretrained(processor_path)
 
             if "joint_learning" in args.mode and model_type=="finetuned":
+                
+
                 model = model_jl.from_pretrained(
-               "finetuned_models/joint_learning_extended_mask/2.2B/checkpoint-1800",
+                model_path,
                 torch_dtype=torch.bfloat16,
                 use_mask = "mask" in args.mode,
                 use_emph = ("mask" in args.mode) and ("emph" in args.mode),
@@ -833,7 +839,7 @@ def vis(args):
             explainations = [None for i in range(len(videos))]
             paths         = [f"{pref_dir}/{sample}/{videos[i]}" for i in range(len(videos))]
            
-            #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_003748/{videos[i]}" for i in range(len(videos))]
+            paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_001148/{videos[i]}" for i in range(len(videos))]
             #paths         = [f"dataset/got10k/teacher/train/uniform_blur/GOT-10k_Train_008365/{videos[i]}" for i in range(len(videos))]
 
             #normalized_bbox = extract_bbox(f"dataset/GOT10KVAL_teacher/{sample}/{ext}") if "BB" in args.mode else None
@@ -852,7 +858,9 @@ def vis(args):
                         "role": "user",
                         "content": [
                             {"type": "video", "path": f"{path}"},
-                            {"type": "text", "text": "Which direction the horse is heading"}, #prompt
+                            {"type": "text", "text": prompt}, #prompt
+                            
+                            
                         ]
                     },
                 ]
@@ -909,8 +917,8 @@ def vis(args):
 
                     
                     
-                    
-                #model.eval()
+                  
+                
                
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     generated_ids = model.generate(**inputs, do_sample=False, max_new_tokens=128)
@@ -1615,40 +1623,11 @@ def eval(args):
 
             
 
-            
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  
 def eval_check_qual(args):
 
     if True:
-        modelTXT = SentenceTransformer('all-MiniLM-L6-v2')
-
-        d = {}
+      
         dd = {}
      
         model_path = args.orig_dir if "baseline" in args.mode else args.finetuned_dir
@@ -1662,34 +1641,25 @@ def eval_check_qual(args):
             processor = SmolVLMProcessor.from_pretrained(processor_path)
 
 
-        
-        downsample_factors = [1, 2, 4, 8, 16, 32] if "ker" not in args.mode else [1, 15, 25, 35, 45, 75]
-
-
-        if False:
-            pass
-           
+        if args.dir_type == "distilled_models":
+            model = SmolVLMForConditionalGeneration.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            #_attn_implementation="flash_attention_2",
+        ).to("cuda")
 
         else:
-            if args.dir_type == "distilled_models":
-                model = SmolVLMForConditionalGeneration.from_pretrained(
+
+            if "joint_learning" in args.mode and args.dir_type=="finetuned_models":
+                model = model_jl.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
+                use_mask = "mask" in args.mode,
+                use_emph = ("mask" in args.mode) and ("emph" in args.mode),
+                foc   = ("foc" in args.mode),
+                l2    = ("l2" in args.mode)
                 #_attn_implementation="flash_attention_2",
-            ).to("cuda")
-
-            else:
-
-                if "joint_learning" in args.mode and args.dir_type=="finetuned_models":
-                    model = model_jl.from_pretrained(
-                    model_path,
-                    torch_dtype=torch.bfloat16,
-                    use_mask = "mask" in args.mode,
-                    use_emph = ("mask" in args.mode) and ("emph" in args.mode),
-                    foc   = ("foc" in args.mode),
-                    l2    = ("l2" in args.mode)
-                    #_attn_implementation="flash_attention_2",
-                    ).to("cuda")
+                ).to("cuda")
         
         image_token_id = None
         if args.model_size != "internVL":
@@ -1768,21 +1738,17 @@ def eval_check_qual(args):
             
             
             for i, ex in enumerate(explainations):
-                
-
-    
+      
                 gt_letter = gt.split(".")[0]
                 ex = ex.split(".")[0]
                 if args.eval == 'tempcomp_yes_no':
                     ex = ex.lower()
 
-
                 sym = "C" if gt_letter == ex else "W"
                 if sym == "W":
                     print(gt_letter)
-                    print(ex)
-                    
-                open(f"check_res3/{real_vidID}_${dim}$_{sym}.txt", "w").close()
+                    print(ex) 
+                open(f"motivation_results/{real_vidID}_${dim}$_{sym}.txt", "w").close()
 
             
 
@@ -1792,7 +1758,7 @@ def extract_info(args):
     from collections import defaultdict
 
      # Paths
-    base_dir = "check_res3"       # contains .txt and flow_*.pt
+    base_dir = "motivation_results"       # contains .txt and flow_*.pt
     gt_dir = "dataset/tempcomp/videos"  # ground truth subfolders by ID
 
     results = defaultdict(list)
@@ -1805,7 +1771,8 @@ def extract_info(args):
         # Example: 1034419625##1_animals$_W.txt
         stem = fname[:-4]
         try:
-            id_i, category_letter = stem.split("_", 1)
+            #id_i, category_letter = stem.split("_$")
+            id_i, category_letter = stem.split("_", 1) #
             category, letter = category_letter.split("$_")
             letter = letter  # "W" or "C"
             category = category.split("$")[-1]
@@ -1813,12 +1780,14 @@ def extract_info(args):
           
         except ValueError:
             print("Skipping malformed:", fname)
+            exit(1)
             continue
 
         # Prediction file
         flow_path = os.path.join(base_dir, f"flow_{id_i}.pt")
         if not os.path.exists(flow_path):
-            print("Missing flow:", flow_path)
+            #print("Missing flow:", flow_path)
+            #exit(1)
             continue
         pred = torch.load(flow_path)  # [29,2]
 
@@ -1829,12 +1798,27 @@ def extract_info(args):
             print("Missing gt dir:", gt_subdir)
             continue
         gt_files = [f for f in os.listdir(gt_subdir) if f.endswith("pred_tracks.pt")]
+        vis_files = [f for f in os.listdir(gt_subdir) if f.endswith("pred_visibility.pt")]
+
         if not gt_files:
             print("No gt in:", gt_subdir)
             continue
+        if len(gt_files) > 1:
+            print("WHY")
+            exit(1)
         gt = torch.load(os.path.join(gt_subdir, gt_files[0]))  # assume first
+        vis_pred = torch.load(os.path.join(gt_subdir, vis_files[0]))
+
+        print(gt.shape)
+        print(pred.shape)
+        print(vis_pred.shape)
+        #exit(1)
 
         # Compute L1
+        pred = pred[vis_pred]
+        gt = gt[vis_pred]
+
+        
         l1 = torch.abs(pred - gt).mean().item()
         results[(category, letter)].append(l1)
 

@@ -661,21 +661,34 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         movement_vectors_loss = []
 
         
-        #import numpy as np
-        #for i in range(last_hidden_state.shape[0]):
-        #    l2 = torch.sum(last_hidden_state[i], dim=-1)  # [729]
-        #    # Reshape to 27x27
-        #    heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
-        #    # Upsample to 128x128
-        #    heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
-        #    heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
-        #    # Normalize to 0-255 and convert to uint8
-        #    heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
-        #    heatmap_uint8 = heatmap_norm.astype(np.uint8)
-        #    # Apply colormap
-        #    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        #    # Save the image
-        #    cv2.imwrite(f'to_del/b_{i}.png', heatmap_color)
+        import numpy as np
+        for i in range(last_hidden_state.shape[0]):
+            l2 = torch.sum(last_hidden_state[i], dim=-1)  # [729]
+            # Reshape to 27x27
+            heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
+            # Upsample to 128x128
+            heatmap_up = F.interpolate(heatmap, size=(256, 256), mode='bilinear', align_corners=False)
+            heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
+            # Normalize to 0-255 and convert to uint8
+            heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
+            heatmap_uint8 = heatmap_norm.astype(np.uint8)
+            # Apply colormap
+            heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+
+            x = pixel_values_copy[0]
+            x = x[i,:,:,:]
+
+            x = x.permute(1, 2, 0)
+            x = x.cpu().float().numpy()
+            x = (x - x.min()) / (x.max() - x.min())
+            x = np.float32(x)
+            x =  np.uint8(255 * x)
+            x = cv2.cvtColor(np.array(x), cv2.COLOR_RGB2BGR)
+            x = cv2.cvtColor(x, cv2.COLOR_BGR2RGB)
+            x_resized = cv2.resize(x, (256, 256))
+            gap = np.zeros((256, 10, 3), dtype=np.uint8)  # 10-px black gap
+            combined = np.hstack([x_resized, gap, heatmap_color])
+            cv2.imwrite(f"{video_id}/norm_maps/frame_{i:03d}.png", combined)
 #
         #    x = pixel_values_copy[0]
         #    x = x[i,:,:,:]
@@ -726,6 +739,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
             f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
             if self.foc:
                 f_next = f_t
+             
             else:
                 f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
             f_t        = f_t.reshape(B*(T-1),H,D)
@@ -735,7 +749,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
 
             flow, _ = global_correlation_softmax(f_t, f_next)
             flow = flow.permute(0,2,3,1).view(B*(T-1),H,2) 
-            print(video_id)
+            
           
 
             
@@ -743,8 +757,7 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
             
             import numpy as np
             import matplotlib.pyplot as plt
-            print(flow.shape)
-            print(pixel_values_copy.shape)
+         
             grid_size = 27
             patch_h = 384 // grid_size
             patch_w = 384 // grid_size
@@ -793,11 +806,10 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
                 )
                 plt.axis("off")
                 plt.tight_layout()
-                plt.savefig(f"to_del4/frame_{i:03d}X.png", dpi=150)
+                plt.savefig(f"{video_id}/displacements/frame_{i:03d}.png", dpi=150)
                 plt.close()
 
-            print(flow[0,:,:,:])
-            exit(1)
+          
             #print(flow.shape)
 
             #if self.foc:
@@ -1245,6 +1257,8 @@ class SmolVLMModel(SmolVLMPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, SmolVLMBaseModelOutputWithPast]:
+
+       
         
         movement_vectors_loss = None
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1391,8 +1405,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         return loss
 
     
-    
-
+   
    
     def forward(
         self,
@@ -1434,7 +1447,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        
+  
  
         outputs = self.model(
             input_ids=input_ids,
@@ -1453,6 +1466,7 @@ class SmolVLMForConditionalGeneration(SmolVLMPreTrainedModel, GenerationMixin):
             movement_vectors = movement_vectors,
             pred_visibility = pred_visibility,
             inner_mask = inner_mask,
+            video_id = video_id,
 
             
 

@@ -502,7 +502,7 @@ def main():
 
     #target_tests = ["blur_video_ker", "blur_video", "blur_video_ker_sorted", "blur_video_sorted"]
 
-    #target_tests = ["tempcomp_motion_bench_sports"]
+    target_tests = ["tempcomp_mvbench"]
 
 
     #print("Collecting results...")

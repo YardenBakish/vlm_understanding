@@ -620,8 +620,6 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
         if self.use_cfg and self.training:
             
             loss_rec =  self.movement_vector_predictor(last_hidden_state,pred_tracks, pred_visibility )
-           
-
             optical_maps_pred = [loss_rec]
 
 
@@ -653,58 +651,45 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
 
         
         import numpy as np
-        #for i in range(last_hidden_state.shape[0]):
-        #    l2 = torch.linalg.vector_norm(last_hidden_state[i], dim=-1)  # [729]
-        #    # Reshape to 27x27
-        #    heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
-        #    # Upsample to 128x128
-        #    heatmap_up = F.interpolate(heatmap, size=(128, 128), mode='bilinear', align_corners=False)
-        #    heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
-        #    # Normalize to 0-255 and convert to uint8
-        #    heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
-        #    heatmap_uint8 = heatmap_norm.astype(np.uint8)
-        #    # Apply colormap
-        #    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        #    # Save the image
-        #    cv2.imwrite(f'to_del/c_{i}.png', heatmap_color)
-        #    #print("REACHED")
-        #exit(1)
-        
+        for i in range(last_hidden_state.shape[0]):
+            l2 = torch.sum(last_hidden_state[i], dim=-1)  # [729]
+            # Reshape to 27x27
+            heatmap = l2.view(1, 1, 27, 27)  # [1, 1, H, W] for interpolate
+            # Upsample to 128x128
+            heatmap_up = F.interpolate(heatmap, size=(256, 256), mode='bilinear', align_corners=False)
+            heatmap_np = heatmap_up.squeeze().detach().cpu().numpy()  # shape: [128, 128]
+            # Normalize to 0-255 and convert to uint8
+            heatmap_norm = cv2.normalize(heatmap_np, None, 0, 255, cv2.NORM_MINMAX)
+            heatmap_uint8 = heatmap_norm.astype(np.uint8)
+            # Apply colormap
+            heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
 
+            x = pixel_values_copy[0]
+            x = x[i,:,:,:]
+            gap = np.zeros((256, 10, 3), dtype=np.uint8)  # 10-px black gap
+            combined = np.hstack([gap, heatmap_color])
+            cv2.imwrite(f"{video_id}/norm_maps/frame_{i:03d}.png", combined)
+       
+        if True:
+            T = 30
+            B = hidden_states.shape[0] // T
+            H, D = hidden_states.shape[1:]  # 729, 1152 
+            hidden_states_reshape = last_hidden_state.view(B,T,H,D)
+            f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
+            f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
+            f_t        = f_t.reshape(B*(T-1),H,D)
+            f_next     = f_next.reshape(B*(T-1),H,D)
+            flow, _ = global_correlation_softmax(f_t, f_next)
+            flow = flow.permute(0,2,3,1).view(B*(T-1),H,2)
+            #torch.save(flow, f"motivation_results/flow_{video_id}.pt")
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
-        #print(last_hidden_state.shape)
-        #exit(1)
 
-        
-        T = 30
-        B = hidden_states.shape[0] // T
-        H, D = hidden_states.shape[1:]  # 729, 1152 
-        hidden_states_reshape = last_hidden_state.view(B,T,H,D)
-        f_t     = hidden_states_reshape[:, :-1]   # [B,T-1,M,d]
-        f_next  = hidden_states_reshape[:, 1:]    # [B,T-1,M,d] 
-        f_t        = f_t.reshape(B*(T-1),H,D)
-        f_next     = f_next.reshape(B*(T-1),H,D)
-
-    
-
-        flow, _ = global_correlation_softmax(f_t, f_t)
-        flow = flow.permute(0,2,3,1).view(B*(T-1),H,2)
-        #torch.save(flow, f"check_res3/flow_{video_id}.pt")
-
-    
-      
-        
+       
         magnitudes = np.linalg.norm(flow.detach().cpu().numpy(), axis=-1)
 
-
-        print(magnitudes.max())
-        print(magnitudes.min())
-
-        
         import matplotlib.pyplot as plt
-        print(flow.shape)
-        print(pixel_values_copy.shape)
+       
         grid_size = 27
         patch_h = 384 // grid_size
         patch_w = 384 // grid_size
@@ -738,9 +723,12 @@ class SmolVLMVisionTransformer(SmolVLMPreTrainedModel):
             )
             plt.axis("off")
             plt.tight_layout()
-            plt.savefig(f"to_del3/frame_{i:03d}Y.png", dpi=150)
+            plt.savefig(f"{video_id}/displacements/frame_{i:03d}.png", dpi=150)
             plt.close()
-        exit(1)
+        
+
+
+
         
         if not return_dict:
             return (last_hidden_state,) + encoder_outputs[1:]
